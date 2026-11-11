@@ -22,6 +22,8 @@ export interface Source {
 export interface Conversation {
   id: string;
   title: string | null;
+  /** Start of the first question; a fallback label while there is no title (e.g. the answer failed). */
+  preview?: string | null;
   timezone: string;
   created_at: number;
   updated_at: number;
@@ -243,7 +245,12 @@ export function openDb(path: string = config.dbPath) {
     },
 
     listConversations(limit = 100): Conversation[] {
-      return all("SELECT * FROM conversations ORDER BY updated_at DESC LIMIT ?", limit).map(toConversation);
+      return all(
+        `SELECT c.*, (SELECT substr(m.text, 1, 80) FROM messages m
+                      WHERE m.conversation_id = c.id AND m.role = 'user' ORDER BY m.created_at, m.id LIMIT 1) AS preview
+         FROM conversations c ORDER BY c.updated_at DESC LIMIT ?`,
+        limit,
+      ).map((r) => ({ ...toConversation(r), preview: r.preview == null ? null : String(r.preview) }));
     },
 
     setTitle(id: string, title: string): void {
