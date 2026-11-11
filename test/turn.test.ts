@@ -1,54 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import type OpenAI from "openai";
 import { runTurn, type TurnEvent } from "../src/agent/turn.js";
-import type { SearchOutput, SourceRegistry } from "../src/agent/search.js";
 import { config } from "../src/config.js";
+import { fakeClient, fakeSearch, type Round } from "./fakes.js";
 
 /**
  * Exercises the agent loop with a scripted fake model and fake search, so the
  * control flow (parallel calls, rounds, caps, history, errors) is tested
  * without network access.
  */
-
-type Round = { calls?: string[]; text?: string };
-
-function fakeClient(rounds: Round[]) {
-  const requests: any[] = [];
-  const client = {
-    responses: {
-      create: async (params: any) => {
-        requests.push(structuredClone(params));
-        const r = rounds[requests.length - 1] ?? { text: "fallback" };
-        const output: any[] = [{ type: "reasoning", id: `rs_${requests.length}`, summary: [], encrypted_content: "x" }];
-        async function* events() {
-          for (const [i, q] of (r.calls ?? []).entries()) {
-            const item = { type: "function_call", id: `fc_${i}`, call_id: `call_${requests.length}_${i}`, name: "web_search", arguments: JSON.stringify({ query: q, topic: null, start_date: null, max_results: null }) };
-            output.push(item);
-            yield { type: "response.output_item.done", item };
-          }
-          if (r.text) {
-            for (const chunk of r.text.match(/.{1,8}/gs) ?? []) yield { type: "response.output_text.delta", delta: chunk };
-            output.push({ type: "message", role: "assistant", content: [{ type: "output_text", text: r.text }] });
-          }
-          yield { type: "response.completed", response: { status: "completed", output, usage: { input_tokens: 100, input_tokens_details: { cached_tokens: 80 }, output_tokens: 20 } } };
-        }
-        return events();
-      },
-    },
-  };
-  return { client: client as unknown as Pick<OpenAI, "responses">, requests };
-}
-
-function fakeSearch(log: string[]) {
-  return async (args: unknown, sources: SourceRegistry): Promise<SearchOutput> => {
-    const { query } = args as { query: string };
-    log.push(query);
-    const url = `https://example.com/${encodeURIComponent(query)}`;
-    const n = sources.add({ title: query, url, published: null });
-    return { query, results: [{ n, title: query, url, published: null, content: `about ${query}` }] };
-  };
-}
 
 const ctx = { now: Date.parse("2026-11-11T07:00:00Z"), timezone: "Asia/Kolkata" };
 
