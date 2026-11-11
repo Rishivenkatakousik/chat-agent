@@ -6,11 +6,21 @@ import type { SearchOutput, SourceRegistry } from "../src/agent/search.js";
 /** One scripted model round: tool calls and/or text; `fail` throws; `delayMs` waits (honouring abort) before streaming. */
 export type Round = { calls?: string[]; text?: string; fail?: string; delayMs?: number };
 
-export function fakeClient(rounds: Round[]) {
+/**
+ * `extract` answers non-streaming calls (background fact/title extraction): an object to return as JSON,
+ * or an Error to throw. Those calls are recorded in `extractRequests`, not `requests`.
+ */
+export function fakeClient(rounds: Round[], extract: object | Error = { title: null, facts: [] }) {
   const requests: any[] = [];
+  const extractRequests: any[] = [];
   const client = {
     responses: {
       create: async (params: any, opts?: { signal?: AbortSignal }) => {
+        if (!params.stream) {
+          extractRequests.push(structuredClone(params));
+          if (extract instanceof Error) throw extract;
+          return { status: "completed", output_text: JSON.stringify(extract) };
+        }
         requests.push(structuredClone(params));
         const r = rounds[requests.length - 1] ?? { text: "fallback" };
         if (r.delayMs) {
@@ -40,7 +50,7 @@ export function fakeClient(rounds: Round[]) {
       },
     },
   };
-  return { client: client as unknown as Pick<OpenAI, "responses">, requests };
+  return { client: client as unknown as Pick<OpenAI, "responses">, requests, extractRequests };
 }
 
 export function fakeSearch(log: string[]) {

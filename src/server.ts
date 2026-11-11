@@ -6,7 +6,8 @@ import { serveStatic } from "@hono/node-server/serve-static";
 import { z } from "zod";
 import { config, missingKeys } from "./config.js";
 import { getDb, type Db } from "./db.js";
-import { ChatError, startChat, type ChatRequest } from "./chat.js";
+import { ChatError, settleBackground, startChat, type ChatRequest } from "./chat.js";
+import { backfillEmbeddings } from "./agent/extract.js";
 
 const chatBody = z.object({
   conversationId: z.string().min(1).max(64).nullish(),
@@ -103,11 +104,19 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     console.log(`Minimi running at http://localhost:${info.port}  (model ${config.chatModel}, db ${config.dbPath})`);
   });
 
-  const shutdown = () => {
+  // Vectors for messages stored without one (e.g. seeded before a key was set). Off the startup path.
+  void backfillEmbeddings(db).catch((err) => console.warn("[embed] backfill failed:", err));
+
+  let stopping = false;
+  const shutdown = async () => {
+    if (stopping) process.exit(1); // second Ctrl+C: don't wait
+    stopping = true;
     server.close();
+    // Let in-flight fact extraction finish (bounded) so it isn't lost.
+    await Promise.race([settleBackground(), new Promise((r) => setTimeout(r, 5_000))]);
     db.close();
     process.exit(0);
   };
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", () => void shutdown());
+  process.on("SIGTERM", () => void shutdown());
 }

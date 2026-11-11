@@ -3,6 +3,7 @@ import { resolveTimeRefs, safeTimeZone } from "./agent/time.js";
 import { friendlyError, HISTORY_MESSAGES, runTurn, type TurnEvent, type TurnInput, type TurnStats } from "./agent/turn.js";
 import { recall } from "./agent/recall.js";
 import { embedQuery, type Embedder } from "./agent/embed.js";
+import { enrichExchange, type EnrichDeps } from "./agent/extract.js";
 
 /**
  * One chat request end to end: create the conversation if needed, store the
@@ -13,7 +14,9 @@ import { embedQuery, type Embedder } from "./agent/embed.js";
 export type ChatEvent =
   | { type: "conversation"; id: string; created: boolean }
   | Exclude<TurnEvent, { type: "done" }>
-  | { type: "done"; messageId: number; text: string; sources: Source[]; stats: TurnStats };
+  | { type: "done"; messageId: number; text: string; sources: Source[]; stats: TurnStats }
+  /** Sent after done, for a new conversation, once the background job has named it. */
+  | { type: "title"; conversationId: string; title: string };
 
 export interface ChatRequest {
   db: Db;
@@ -24,7 +27,7 @@ export interface ChatRequest {
   signal?: AbortSignal;
   now?: number;
   /** Test seams: fake model/search for runTurn, fake query embedder for recall (null disables embeddings). */
-  deps?: TurnInput["deps"] & { embed?: Embedder | null };
+  deps?: TurnInput["deps"] & { embed?: Embedder | null; embedMany?: EnrichDeps["embedMany"] };
 }
 
 export class ChatError extends Error {
@@ -38,6 +41,15 @@ export class ChatError extends Error {
 
 /** Conversations with a turn in flight; a second concurrent message to the same one is rejected. */
 const busy = new Set<string>();
+
+/** Background enrichment jobs still running (awaited by tests and on shutdown). */
+const background = new Set<Promise<unknown>>();
+export async function settleBackground(): Promise<void> {
+  while (background.size) await Promise.allSettled([...background]);
+}
+
+/** How long the stream stays open after `done` waiting for a new conversation's title. */
+const TITLE_WAIT_MS = 4_000;
 
 export function isBusy(conversationId: string): boolean {
   return busy.has(conversationId);
@@ -61,6 +73,13 @@ export function startChat(req: ChatRequest): { conversationId: string; run: () =
   conv ??= db.createConversation({ timezone });
   const conversationId = conv.id;
   busy.add(conversationId);
+
+  // Released once, either when the answer is done or when the run ends, never twice.
+  let released = false;
+  const release = () => {
+    if (!released) busy.delete(conversationId);
+    released = true;
+  };
 
   const run = async (): Promise<Message | null> => {
     try {
@@ -102,6 +121,22 @@ export function startChat(req: ChatRequest): { conversationId: string; run: () =
         createdAt: Math.max(Date.now(), now + 1),
       });
       req.onEvent({ type: "done", messageId: answer.id, text: result.text, sources: result.sources, stats: result.stats });
+      // The answer is complete: free the conversation before the background work.
+      release();
+
+      // Facts, title and embeddings run off the response path and are never awaited by the reply.
+      const job = enrichExchange(db, question, answer, { client: req.deps?.client, embedMany: req.deps?.embedMany });
+      background.add(job);
+      void job.finally(() => background.delete(job));
+
+      // For an untitled conversation, keep the stream open briefly so the sidebar can show the new title.
+      if (!db.getConversation(conversationId)?.title && !req.signal?.aborted) {
+        let timer: NodeJS.Timeout | undefined;
+        const timeout = new Promise<null>((resolve) => (timer = setTimeout(resolve, TITLE_WAIT_MS, null)));
+        const enriched = await Promise.race([job, timeout]);
+        clearTimeout(timer);
+        if (enriched?.title) req.onEvent({ type: "title", conversationId, title: enriched.title });
+      }
       return answer;
     } catch (err) {
       if (req.signal?.aborted) {
@@ -112,7 +147,7 @@ export function startChat(req: ChatRequest): { conversationId: string; run: () =
       req.onEvent({ type: "error", message: friendlyError(err) });
       return null;
     } finally {
-      busy.delete(conversationId);
+      release();
     }
   };
 

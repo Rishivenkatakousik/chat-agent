@@ -212,6 +212,23 @@ export async function recall(input: RecallInput): Promise<RecallResult> {
     }
   }
 
+  // Fact matches by name, when the user refers to the past. A matched fact also brings back the exchange
+  // it came from (a few at most), since its wording may share too few keywords to be found directly.
+  const factHits: Fact[] = [];
+  if (match && (cue || timeRefs.length)) {
+    const sourceMessages = new Set<number>();
+    for (const f of db.searchFacts(match, undefined, 15)) {
+      if (f.message_id != null && exclude.has(f.message_id)) continue;
+      // Same bar as message recall: one generic word ("pricing") doesn't pull in unrelated facts.
+      if (coverage(keywords, `${f.entity} ${f.attribute} ${f.value}`) < Math.min(2, keywords.length)) continue;
+      factHits.push(f);
+      if (f.message_id != null && sourceMessages.size < 3 && !sourceMessages.has(f.message_id)) {
+        sourceMessages.add(f.message_id);
+        pick(f.message_id, "topic", 0);
+      }
+    }
+  }
+
   // Expand hits into full exchanges (question + answer), deduplicated by the question.
   const exchanges = new Map<string, { messages: Message[]; reason: RecallReason; score: number }>();
   for (const { anchor, reason, score } of picked.values()) {
@@ -235,13 +252,7 @@ export async function recall(input: RecallInput): Promise<RecallResult> {
   // (c) Facts: those recorded with the recalled answers, plus keyword matches when the user refers to the past.
   const factMap = new Map<number, Fact>();
   for (const f of db.factsForMessages(ordered.flatMap((e) => e.messages.map((m) => m.id)))) factMap.set(f.id, f);
-  if (match && (cue || timeRefs.length)) {
-    for (const f of db.searchFacts(match, undefined, 15)) {
-      if (f.message_id != null && exclude.has(f.message_id)) continue;
-      // Same bar as message recall: one generic word ("pricing") doesn't pull in unrelated facts.
-      if (coverage(keywords, `${f.entity} ${f.attribute} ${f.value}`) >= Math.min(2, keywords.length)) factMap.set(f.id, f);
-    }
-  }
+  for (const f of factHits) factMap.set(f.id, f);
   const facts = [...factMap.values()].sort((a, b) => a.observed_at - b.observed_at || a.id - b.id);
 
   const budget = input.charBudget ?? config.memoryCharBudget;
