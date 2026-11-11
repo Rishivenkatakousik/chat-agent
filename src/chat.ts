@@ -1,6 +1,8 @@
 import type { Db, Message, Source } from "./db.js";
 import { resolveTimeRefs, safeTimeZone } from "./agent/time.js";
-import { friendlyError, runTurn, type TurnEvent, type TurnInput, type TurnStats } from "./agent/turn.js";
+import { friendlyError, HISTORY_MESSAGES, runTurn, type TurnEvent, type TurnInput, type TurnStats } from "./agent/turn.js";
+import { recall } from "./agent/recall.js";
+import { embedQuery, type Embedder } from "./agent/embed.js";
 
 /**
  * One chat request end to end: create the conversation if needed, store the
@@ -21,8 +23,8 @@ export interface ChatRequest {
   onEvent: (e: ChatEvent) => void;
   signal?: AbortSignal;
   now?: number;
-  /** Test seam passed through to runTurn. */
-  deps?: TurnInput["deps"];
+  /** Test seams: fake model/search for runTurn, fake query embedder for recall (null disables embeddings). */
+  deps?: TurnInput["deps"] & { embed?: Embedder | null };
 }
 
 export class ChatError extends Error {
@@ -67,11 +69,18 @@ export function startChat(req: ChatRequest): { conversationId: string; run: () =
 
       const history = db.getMessages(conversationId);
       // Stored first so the question is never lost; the answer is stored only if the run succeeds.
-      db.appendMessage({ conversationId, role: "user", text: message, createdAt: now });
+      const question = db.appendMessage({ conversationId, role: "user", text: message, createdAt: now });
 
       const timeRefs = resolveTimeRefs(message, now, timezone);
-      // Step 7 fills this with recalled exchanges and facts.
-      const memory: string | null = null;
+      // Recall skips what the model already sees: the recent history sent verbatim, and this question.
+      const exclude = new Set([question.id, ...history.slice(-HISTORY_MESSAGES).map((m) => m.id)]);
+      const embed = req.deps?.embed === null ? undefined : (req.deps?.embed ?? embedQuery);
+      const recalled = await recall({ db, message, timezone, timeRefs, exclude, embed, signal: req.signal });
+      const memory = recalled.memory;
+      console.log(
+        `[recall] ${recalled.exchanges.length} exchanges, ${recalled.facts.length} facts, ${recalled.notes.length} notes ` +
+          `(keywords: ${recalled.stats.keywords.join(", ") || "-"}; cue: ${recalled.stats.cue}; vectors: ${recalled.stats.usedEmbeddings}; ${recalled.stats.ms}ms)`,
+      );
 
       const result = await runTurn({
         message,

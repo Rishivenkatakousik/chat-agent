@@ -3,13 +3,14 @@ import assert from "node:assert/strict";
 import { createApp } from "../src/server.js";
 import { openDb } from "../src/db.js";
 import { fakeClient, fakeSearch, type Round } from "./fakes.js";
+import { seedDemo } from "../scripts/seed-data.js";
 
 /** HTTP + SSE path end to end, with a fake model and search and an in-memory database. */
 
 function setup(rounds: Round[]) {
   const db = openDb(":memory:");
   const { client, requests } = fakeClient(rounds);
-  const app = createApp(db, { deps: { client, search: fakeSearch([]) }, requireKeys: false });
+  const app = createApp(db, { deps: { client, search: fakeSearch([]), embed: null }, requireKeys: false });
   return { db, app, requests };
 }
 
@@ -124,4 +125,17 @@ test("DELETE removes the conversation", async () => {
   const id = (await readSSE(await chat(app, { message: "hi" })))[0]!.data.id;
   assert.equal((await app.request(`/api/conversations/${id}`, { method: "DELETE" })).status, 204);
   assert.equal(db.getConversation(id), undefined);
+});
+
+test("recall: the seeded Postgres exchange reaches the model's context through /api/chat", async () => {
+  const db = openDb(":memory:");
+  const now = Date.now();
+  seedDemo(db, { now, timezone: "Asia/Kolkata" });
+  const { client, requests } = fakeClient([{ text: "On that day you compared Neon, Supabase, Render and RDS." }]);
+  const app = createApp(db, { deps: { client, search: fakeSearch([]), embed: null }, requireKeys: false });
+  const events = await readSSE(await chat(app, { message: "Last Tuesday I asked about Postgres hosting. Has pricing changed?", timezone: "Asia/Kolkata" }));
+  assert.equal(events.at(-1)!.event, "done");
+  const userInput: string = requests[0].input.at(-1).content;
+  assert.match(userInput, /<memory>[\s\S]*Managed Postgres hosting prices[\s\S]*Neon · Launch plan price[\s\S]*<\/memory>/);
+  assert.doesNotMatch(userInput, /### .*Weekend in Lisbon/);
 });

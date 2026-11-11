@@ -54,7 +54,7 @@ export interface TurnResult {
 /** Model round trips per turn (each can contain several parallel searches). */
 const MAX_ROUNDS = 5;
 /** Recent conversation kept verbatim; older turns are reachable through memory recall. */
-const HISTORY_MESSAGES = 12;
+export const HISTORY_MESSAGES = 12;
 const HISTORY_CHARS = 16_000;
 
 let client: OpenAI | undefined;

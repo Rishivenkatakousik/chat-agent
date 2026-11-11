@@ -208,7 +208,9 @@ export function openDb(path: string = config.dbPath) {
   const all = (sql: string, ...params: SQLInputValue[]) => db.prepare(sql).all(...params) as Row[];
   const get = (sql: string, ...params: SQLInputValue[]) => db.prepare(sql).get(...params) as Row | undefined;
 
+  /** Runs fn atomically. Reentrant: a nested call joins the outer transaction. */
   function transaction<T>(fn: () => T): T {
+    if (db.isTransaction) return fn();
     db.exec("BEGIN");
     try {
       const out = fn();
