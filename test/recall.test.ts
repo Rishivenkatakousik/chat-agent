@@ -11,7 +11,7 @@ const NOW = Date.parse("2026-11-11T07:00:00Z"); // Wed 11 Nov 2026, 12:30 IST
 
 /** Deterministic "semantic" embedder: one dimension per concept, so synonyms land together without network. */
 const CONCEPTS: RegExp[] = [
-  /\b(crm|customer relationship|sales (?:tool|software|team)|pipedrive|hubspot|attio|folk|zoho)/gi,
+  /\b(crm|customer relationship|contact[- ]management|sales (?:tool|software|team)|pipedrive|hubspot|attio|folk|zoho)/gi,
   /\b(postgres|database|neon|supabase|rds|render)/gi,
   /\b(lisbon|trip|weekend|travel|itinerary)/gi,
 ];
@@ -128,12 +128,52 @@ test("a fact search by entity name finds facts on its own", async () => {
 test("embeddings bridge synonyms that keywords miss", async () => {
   const { db, seeded } = setup();
   for (const m of seeded.messages) db.setEmbedding(m.id, (await fakeEmbed(m.text))!);
-  const q = "Remember the customer relationship software we picked? Anything new?";
+  const q = "Remember the contact-management apps we looked at? Anything new?";
   const withoutVec = await ask(db, q);
   assert.equal(withoutVec.exchanges.length, 0, "no keyword overlap");
   const withVec = await ask(db, q, fakeEmbed);
   assert.equal(withVec.stats.usedEmbeddings, true);
   assert.deepEqual(titles(withVec), ["CRM shortlist for a 6-person sales team"]);
+});
+
+// ── Phrasings from real use (a user's transcript where recall missed) ──
+
+test("'one day I have discussed…' with a typo and a missing space still finds the Lisbon chat", async () => {
+  const { db } = setup();
+  const q = "one day i have discussed about weekend in lisdon.can u give me the date when i have asked u";
+  assert.ok(hasMemoryCue(q), "'i have discussed' and 'one day' are memory cues");
+  assert.deepEqual(extractKeywords(q), ["weekend", "lisdon"], "\"lisdon.can\" is split; \"can\" is a stopword");
+  const r = await ask(db, q);
+  assert.deepEqual(titles(r), ["Weekend in Lisbon"], "'weekend' is distinctive, so one matching word is enough with a cue");
+});
+
+test("memory cue phrasings", () => {
+  for (const q of [
+    "did we talk about Neon?",
+    "have I ever asked you about Redis",
+    "we've already compared these",
+    "you once suggested a CRM",
+    "the other day you told me something",
+    "what did I ask the other day",
+    "I had discussed this a while ago",
+  ]) assert.ok(hasMemoryCue(q), q);
+  for (const q of ["What's new in Postgres 18?", "Explain TCP slow start", "best pizza in Lisbon"]) assert.ok(!hasMemoryCue(q), q);
+});
+
+test("a common word never recalls on its own, even with a cue", async () => {
+  const { db } = setup();
+  // "pricing"/"price" appears in several conversations, so it isn't distinctive.
+  const r = await ask(db, "Did we talk about pricing before?");
+  assert.equal(r.exchanges.length, 0);
+});
+
+test("semantic search runs on every message, not only on cues", async () => {
+  const { db, seeded } = setup();
+  for (const m of seeded.messages) db.setEmbedding(m.id, (await fakeEmbed(m.text))!);
+  const r = await ask(db, "Pipedrive or HubSpot for a sales team?", fakeEmbed);
+  assert.equal(r.stats.cue, false);
+  assert.equal(r.stats.usedEmbeddings, true);
+  assert.deepEqual(titles(r), ["CRM shortlist for a 6-person sales team"]);
 });
 
 test("excluded messages (already in the model's history) are not recalled", async () => {

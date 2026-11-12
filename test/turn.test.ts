@@ -103,3 +103,25 @@ test("empty answer is an error", async () => {
   const { client } = fakeClient([{}]);
   await assert.rejects(runTurn({ message: "x", history: [], context: ctx, onEvent: () => {}, deps: { client, search: fakeSearch([]) } }), /empty answer/);
 });
+
+test("recent questions are replayed with the context (memory) the model saw then", async () => {
+  const { client, requests } = fakeClient([{ text: "ok" }]);
+  const mk = (id: number, role: "user" | "assistant", text: string, context?: string) => ({ id, conversation_id: "c", role, text, sources: [], created_at: id, context });
+  const history = [
+    mk(1, "user", "q1", "<context>old</context>"),
+    mk(2, "assistant", "a1"),
+    mk(3, "user", "q2", "<context>memory: Lisbon on Tue 10 Nov 19:00</context>"),
+    mk(4, "assistant", "You asked on Tue 10 Nov at 19:00."),
+    mk(5, "user", "q3", "<context>c3</context>"),
+    mk(6, "assistant", "a3"),
+    mk(7, "user", "q4", "<context>c4</context>"),
+    mk(8, "assistant", "a4"),
+  ];
+  await runTurn({ message: "why wasn't it available earlier?", history, context: ctx, onEvent: () => {}, deps: { client, search: fakeSearch([]) } });
+  const contents = requests[0].input.map((i: any) => i.content as string);
+  assert.equal(contents[0], "q1", "older than the last 3 user turns: plain text");
+  assert.equal(contents[2], "<context>memory: Lisbon on Tue 10 Nov 19:00</context>\n\nq2");
+  assert.equal(contents[4], "<context>c3</context>\n\nq3");
+  assert.equal(contents[6], "<context>c4</context>\n\nq4");
+  assert.equal(contents[3], "You asked on Tue 10 Nov at 19:00.", "assistant turns unchanged");
+});

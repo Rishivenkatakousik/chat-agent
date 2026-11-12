@@ -36,6 +36,12 @@ export interface Message {
   text: string;
   sources: Source[];
   created_at: number;
+  /**
+   * For user messages: the exact <context> block (time, resolved dates, recalled memory) the model saw
+   * with this question. Replayed in later turns so the model keeps the evidence behind its earlier answers.
+   * Loaded only by getMessages(id, { withContext: true }).
+   */
+  context?: string | null;
 }
 
 /** A message returned from a ranked search; lower `rank` is better (FTS5 bm25 convention). */
@@ -80,6 +86,7 @@ CREATE TABLE IF NOT EXISTS messages (
   role            TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
   text            TEXT NOT NULL,
   sources_json    TEXT NOT NULL DEFAULT '[]',
+  context         TEXT,
   embedding       BLOB,
   created_at      INTEGER NOT NULL
 );
@@ -164,6 +171,7 @@ function toMessage(r: Row): Message {
     text: String(r.text),
     sources: JSON.parse(String(r.sources_json ?? "[]")) as Source[],
     created_at: Number(r.created_at),
+    ...(r.context !== undefined ? { context: r.context == null ? null : String(r.context) } : {}),
   };
 }
 
@@ -206,6 +214,9 @@ export function openDb(path: string = config.dbPath) {
   const db = new DatabaseSync(path);
   db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;");
   db.exec(SCHEMA);
+  // Migration for databases created before messages.context existed.
+  const cols = db.prepare("PRAGMA table_info(messages)").all() as { name: string }[];
+  if (!cols.some((c) => c.name === "context")) db.exec("ALTER TABLE messages ADD COLUMN context TEXT");
 
   const all = (sql: string, ...params: SQLInputValue[]) => db.prepare(sql).all(...params) as Row[];
   const get = (sql: string, ...params: SQLInputValue[]) => db.prepare(sql).get(...params) as Row | undefined;
@@ -292,11 +303,16 @@ export function openDb(path: string = config.dbPath) {
       });
     },
 
-    getMessages(conversationId: string): Message[] {
+    getMessages(conversationId: string, opts: { withContext?: boolean } = {}): Message[] {
       return all(
-        `SELECT ${MSG_COLS} FROM messages m WHERE m.conversation_id = ? ORDER BY m.created_at, m.id`,
+        `SELECT ${MSG_COLS}${opts.withContext ? ", m.context" : ""} FROM messages m
+         WHERE m.conversation_id = ? ORDER BY m.created_at, m.id`,
         conversationId,
       ).map(toMessage);
+    },
+
+    setContext(messageId: number, context: string): void {
+      db.prepare("UPDATE messages SET context = ? WHERE id = ?").run(context, messageId);
     },
 
     getMessagesByIds(ids: readonly number[]): Message[] {
@@ -343,6 +359,20 @@ export function openDb(path: string = config.dbPath) {
         to,
         limit,
       ).map(toMessage);
+    },
+
+    hasEmbeddings(): boolean {
+      return get("SELECT 1 AS x FROM messages WHERE embedding IS NOT NULL LIMIT 1") != null;
+    },
+
+    /** Total stored messages (the N in keyword rarity). */
+    countMessages(): number {
+      return Number(get("SELECT count(*) AS n FROM messages")?.n ?? 0);
+    },
+
+    /** How many messages match an FTS5 expression (a keyword's document frequency). */
+    countMatches(match: string): number {
+      return Number(get("SELECT count(*) AS n FROM messages_fts WHERE messages_fts MATCH ?", match)?.n ?? 0);
     },
 
     /** BM25 full-text search over messages, optionally inside a time window. `match` is an FTS5 expression (see toFtsQuery). */

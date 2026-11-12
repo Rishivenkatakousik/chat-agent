@@ -76,14 +76,31 @@ export function openai(): OpenAI {
   return client;
 }
 
-function historyItems(history: Message[]): ResponseInputItem[] {
+/** User turns, counted from the newest, whose <context> (with recalled memory) is replayed verbatim. */
+const REPLAY_CONTEXT_TURNS = 3;
+const REPLAY_CONTEXT_CHARS = 24_000;
+
+export function historyItems(history: Message[]): ResponseInputItem[] {
   const recent = history.slice(-HISTORY_MESSAGES);
   // Drop the oldest messages until the history fits the budget.
   let total = recent.reduce((n, m) => n + m.text.length, 0);
   while (recent.length > 2 && total > HISTORY_CHARS) total -= recent.shift()!.text.length;
   // Start on a user message so the transcript is well-formed.
   while (recent.length && recent[0]!.role !== "user") recent.shift();
-  return recent.map((m) => ({ role: m.role, content: m.text }));
+
+  // Recent questions are replayed exactly as the model first saw them, context block included. Without
+  // this, a follow-up shows the model its own earlier claims ("you asked on Tue 10 Nov at 19:00") with
+  // none of the memory that supported them, and it may wrongly retract them as made up. The identical
+  // text also keeps consecutive turns' prefixes the same, which helps prompt caching.
+  const replay = new Set<number>();
+  let budget = REPLAY_CONTEXT_CHARS;
+  for (const m of [...recent].reverse()) {
+    if (m.role !== "user" || !m.context) continue;
+    if (replay.size >= REPLAY_CONTEXT_TURNS || m.context.length > budget) break;
+    replay.add(m.id);
+    budget -= m.context.length;
+  }
+  return recent.map((m) => ({ role: m.role, content: replay.has(m.id) ? `${m.context}\n\n${m.text}` : m.text }));
 }
 
 /** User-facing message for a failure; details go to the server log. */

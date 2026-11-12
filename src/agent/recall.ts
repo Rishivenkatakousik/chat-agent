@@ -58,12 +58,26 @@ const STOPWORDS = new Set(
   today yesterday tomorrow ago last past next earlier later week weeks month months year years day days morning afternoon evening
   monday tuesday wednesday thursday friday saturday sunday
   january february march april may june july august september october november december
-  jan feb mar apr jun jul aug sep sept oct nov dec`.split(/\s+/),
+  jan feb mar apr jun jul aug sep sept oct nov dec
+  one give gave date dates exact u ur pls plz ya kindly sure
+  pick picked chose choose chosen decide decided plan planned research researched speak spoke chat chatted
+  suggest suggested recommend recommended`.split(/\s+/),
 );
 
 /** Phrases that signal the user is referring to an earlier conversation. */
-const MEMORY_CUE =
-  /\b(?:i|we)\s+(?:asked|discussed|talked|shortlisted|compared|chose|picked|decided|said|mentioned|looked|researched|went over)\b|\byou\s+(?:said|told|suggested|recommended|mentioned|found|quoted|listed|gave)\b|\b(?:last time|earlier|before|previously|remember|again|still|since|changed|any changes|our (?:chat|conversation|discussion)|that list|the list|shortlist)\b/i;
+const PAST_VERB = "(?:ask|asked|discuss|discussed|talk|talked|shortlist|shortlisted|compare|compared|chose|choose|pick|picked|decide|decided|say|said|mention|mentioned|look|looked|research|researched|plan|planned|went over|go over|speak|spoke|chat|chatted)";
+const MEMORY_CUE = new RegExp(
+  [
+    // "I asked", "we have discussed", "I've already asked", "we had once talked"
+    `\\b(?:i|we)(?:'ve|'d)?(?:\\s+(?:have|had|did|already|once|ever|previously|just|also|have already|had once)){0,2}\\s+${PAST_VERB}\\b`,
+    // "did I ask", "have we discussed", "when did we talk"
+    `\\b(?:did|have|had)\\s+(?:i|we)\\s+(?:ever\\s+|already\\s+)?${PAST_VERB}\\b`,
+    // "you said", "you once suggested", "you have told me"
+    `\\byou(?:'ve)?(?:\\s+(?:have|had|once|already|just))?\\s+(?:said|told|suggested|recommended|mentioned|found|quoted|listed|gave|planned|answered|replied)\\b`,
+    `\\b(?:last time|earlier|previously|remember|recall|again|still|since|changed|any changes|one day|the other day|some time ago|a while (?:ago|back)|our (?:chat|conversation|discussion|talk)|that (?:list|chat|conversation)|the list|shortlist|history)\\b`,
+  ].join("|"),
+  "i",
+);
 
 /** Content words of the message, minus stopwords, time words and the resolved time phrases. */
 export function extractKeywords(message: string, timeRefs: TimeRef[] = []): string[] {
@@ -71,7 +85,9 @@ export function extractKeywords(message: string, timeRefs: TimeRef[] = []): stri
   for (const r of timeRefs) text = text.replace(r.phrase.toLowerCase(), " ");
   const words = text.match(/[\p{L}\p{N}][\p{L}\p{N}+#.\-']*[\p{L}\p{N}+#]|[\p{L}]/gu) ?? [];
   const out: string[] = [];
-  for (let w of words) {
+  // "next.js" and "asp.net" stay whole; "lisdon.can" (a missing space) becomes "lisdon" + "can".
+  const parts = words.flatMap((w) => (/\.(?:js|ts|net|io|ai|py|rb|go|sh)$/.test(w) || !w.includes(".") ? [w] : w.split(".")));
+  for (let w of parts) {
     w = w.replace(/'s$/, "");
     if (w.length < 2 || STOPWORDS.has(w)) continue;
     if (/^\d{1,4}(?:st|nd|rd|th)?$/.test(w)) continue; // bare numbers and ordinals are mostly dates or counts
@@ -89,22 +105,39 @@ function stem(w: string): string {
   return w.replace(/(?:ing|edly|ed|es|s|ly)$/, "").slice(0, 7);
 }
 
-/** How many distinct keywords occur in the text (matching at word starts, so "pick" doesn't match "topic"). */
-function coverage(keywords: string[], text: string): number {
-  const t = text.toLowerCase();
-  return keywords.filter((k) => {
-    const s = stem(k).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    return new RegExp(`(?:^|[^\\p{L}\\p{N}])${s}`, "u").test(t);
-  }).length;
+/** Whether a keyword occurs in the text (matching at word starts, so "pick" doesn't match "topic"). */
+function contains(text: string, keyword: string): boolean {
+  const s = stem(keyword).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?:^|[^\\p{L}\\p{N}])${s}`, "u").test(text.toLowerCase());
+}
+
+/**
+ * Keyword match quality: a distinctive keyword counts 1, a common one 0.5. So "weekend" alone
+ * (one conversation) is a real signal, while "pricing" (everywhere) needs a second word with it.
+ */
+function quality(keywords: string[], distinctive: ReadonlySet<string>, text: string): number {
+  return keywords.reduce((q, k) => (contains(text, k) ? q + (distinctive.has(k) ? 1 : 0.5) : q), 0);
 }
 
 // ── Ranking ─────────────────────────────────────────────────────────
 
 const RRF_K = 60;
-/** Cosine thresholds for text-embedding-3-small (unrelated text sits around 0.1–0.25). */
+/**
+ * Cosine thresholds for text-embedding-3-small, measured on real queries: the right past message
+ * scored 0.37–0.51 (typos and paraphrases included), unrelated ones 0–0.17, a related-but-different
+ * topic up to ~0.39. A message that refers to the past ("I asked", "one day") uses the lower bar.
+ */
 const VEC_IN_WINDOW = 0.3;
-const VEC_GLOBAL = 0.35;
-const VEC_STRONG = 0.55;
+const VEC_GLOBAL = 0.33;
+const VEC_STRONG = 0.45;
+/**
+ * With embeddings available, a keyword match must also be at least loosely related in meaning. In a
+ * small history every word looks rare, so "release" or "company" alone matched unrelated chats
+ * (measured: those scored 0.23–0.28; true matches with one shared word scored 0.37+).
+ */
+const VEC_CORROBORATE = 0.3;
+/** A keyword is distinctive when it occurs in at most this share of all messages ("weekend" yes, "pricing" no). */
+const DISTINCTIVE_SHARE = 0.25;
 
 interface Hit {
   id: number;
@@ -152,9 +185,20 @@ export async function recall(input: RecallInput): Promise<RecallResult> {
   const cue = hasMemoryCue(message);
   const match = toFtsQuery(keywords);
 
-  // Embedding only when the message looks like it refers to the past: it's the one network call here.
-  const wantsVector = Boolean(input.embed) && (cue || timeRefs.length > 0);
-  const qvec = wantsVector ? await input.embed!(message, input.signal).catch(() => null) : null;
+  // Every message is searched by meaning as well as by keywords: users rarely phrase a reference to a
+  // past chat the way the code expects ("one day I have discussed…", typos, paraphrases). One embedding
+  // call (~0.5s) per turn, skipped only when nothing has been embedded yet.
+  const qvec = input.embed && db.hasEmbeddings() ? await input.embed(message, input.signal).catch(() => null) : null;
+
+  // Keyword rarity across the whole history decides how much a single matching word counts.
+  const total = db.countMessages();
+  const distinctive = new Set(
+    keywords.filter((k) => {
+      const q = toFtsQuery([k]);
+      const df = q ? db.countMatches(q) : 0;
+      return df > 0 && df <= Math.max(1, total * DISTINCTIVE_SHARE);
+    }),
+  );
 
   const notes: string[] = [];
   const picked = new Map<number, { anchor: number; reason: RecallReason; score: number }>();
@@ -193,19 +237,27 @@ export async function recall(input: RecallInput): Promise<RecallResult> {
   // (b) Whole history: only when the message points at the past, or the match is strong.
   if (match || qvec) {
     const fts = match ? db.searchMessages(match, undefined, 20).filter((m) => !exclude.has(m.id)) : [];
-    const vec = vectorHits(db, qvec, undefined, VEC_GLOBAL).filter((v) => !exclude.has(v.id));
+    // Similarity to every embedded message: ranks semantic hits and corroborates keyword hits.
+    const cosById = new Map(qvec ? db.allEmbeddings().map((r) => [r.id, cosine(qvec, r.embedding)] as const) : []);
+    const vec = [...cosById]
+      .filter(([id, cos]) => cos >= VEC_GLOBAL && !exclude.has(id))
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 20)
+      .map(([id, cos]) => ({ id, cos }));
     const text = new Map(fts.map((m) => [m.id, m.text]));
     const missing = vec.filter((v) => !text.has(v.id)).map((v) => v.id);
     for (const m of db.getMessagesByIds(missing)) text.set(m.id, m.text);
 
-    const minCover = Math.min(2, keywords.length);
     let taken = 0;
     for (const h of fuse(fts, vec)) {
       if (taken >= (cue ? 4 : 2)) break;
-      const cov = coverage(keywords, text.get(h.id) ?? "");
-      // A cue ("I asked", "since") lowers the bar, but one generic word like "pricing" is never enough on its own.
-      const strong = (minCover >= 2 && cov >= 2) || h.cos >= VEC_STRONG;
-      const ok = cue ? (minCover > 0 && cov >= minCover) || h.cos >= VEC_GLOBAL : strong;
+      const q = quality(keywords, distinctive, text.get(h.id) ?? "");
+      const cos = cosById.get(h.id);
+      // A cue ("I asked", "one day") lowers the bar. Keywords count only if the meaning is at least loosely
+      // related too, whenever that can be measured (the message has an embedding); otherwise keywords alone.
+      const keywordOk = (cue ? q >= 1 : q >= 2) && (cos === undefined || cos >= VEC_CORROBORATE);
+      const semanticOk = cos !== undefined && cos >= (cue ? VEC_GLOBAL : VEC_STRONG);
+      const ok = keywordOk || semanticOk;
       if (!ok) continue;
       pick(h.id, "topic", h.score);
       taken++;
@@ -219,8 +271,8 @@ export async function recall(input: RecallInput): Promise<RecallResult> {
     const sourceMessages = new Set<number>();
     for (const f of db.searchFacts(match, undefined, 15)) {
       if (f.message_id != null && exclude.has(f.message_id)) continue;
-      // Same bar as message recall: one generic word ("pricing") doesn't pull in unrelated facts.
-      if (coverage(keywords, `${f.entity} ${f.attribute} ${f.value}`) < Math.min(2, keywords.length)) continue;
+      // Same bar as message recall: one common word ("pricing") doesn't pull in unrelated facts.
+      if (quality(keywords, distinctive, `${f.entity} ${f.attribute} ${f.value}`) < (keywords.length >= 2 ? 1.5 : 1)) continue;
       factHits.push(f);
       if (f.message_id != null && sourceMessages.size < 3 && !sourceMessages.has(f.message_id)) {
         sourceMessages.add(f.message_id);

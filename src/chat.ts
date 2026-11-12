@@ -2,6 +2,7 @@ import type { Db, Message, Source } from "./db.js";
 import { resolveTimeRefs, safeTimeZone } from "./agent/time.js";
 import { friendlyError, HISTORY_MESSAGES, runTurn, type TurnEvent, type TurnInput, type TurnStats } from "./agent/turn.js";
 import { recall } from "./agent/recall.js";
+import { buildContext } from "./agent/prompt.js";
 import { embedQuery, type Embedder } from "./agent/embed.js";
 import { enrichExchange, type EnrichDeps } from "./agent/extract.js";
 
@@ -93,7 +94,7 @@ export function startChat(req: ChatRequest): { conversationId: string; run: () =
       const now = req.now ?? Date.now();
       req.onEvent({ type: "conversation", id: conversationId, created });
 
-      const history = db.getMessages(conversationId);
+      const history = db.getMessages(conversationId, { withContext: true });
       // Stored first so the question is never lost; the answer is stored only if the run succeeds.
       const question = db.appendMessage({ conversationId, role: "user", text: message, createdAt: now });
 
@@ -103,6 +104,8 @@ export function startChat(req: ChatRequest): { conversationId: string; run: () =
       const embed = req.deps?.embed === null ? undefined : (req.deps?.embed ?? embedQuery);
       const recalled = await recall({ db, message, timezone, timeRefs, exclude, embed, signal: req.signal });
       const memory = recalled.memory;
+      // Keep exactly what the model is shown, so later turns can see the evidence behind this answer.
+      db.setContext(question.id, buildContext({ now, timezone, timeRefs, memory }));
       console.log(
         `[recall] ${recalled.exchanges.length} exchanges, ${recalled.facts.length} facts, ${recalled.notes.length} notes ` +
           `(keywords: ${recalled.stats.keywords.join(", ") || "-"}; cue: ${recalled.stats.cue}; vectors: ${recalled.stats.usedEmbeddings}; ${recalled.stats.ms}ms)`,

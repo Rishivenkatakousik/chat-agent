@@ -139,3 +139,21 @@ test("recall: the seeded Postgres exchange reaches the model's context through /
   assert.match(userInput, /<memory>[\s\S]*Managed Postgres hosting prices[\s\S]*Neon · Launch plan price[\s\S]*<\/memory>/);
   assert.doesNotMatch(userInput, /### .*Weekend in Lisbon/);
 });
+
+test("the context each question saw is stored and replayed in the next turn", async () => {
+  const db = openDb(":memory:");
+  seedDemo(db, { now: Date.now(), timezone: "Asia/Kolkata" });
+  const { client, requests } = fakeClient([{ text: "You asked on that day about a Lisbon weekend." }, { text: "It was in memory then." }]);
+  const app = createApp(db, { deps: { client, search: fakeSearch([]), embed: null }, requireKeys: false });
+  const first = await readSSE(await chat(app, { message: "one day I have discussed a weekend in Lisbon, when was it?", timezone: "Asia/Kolkata" }));
+  const id = first[0]!.data.id;
+  const stored = db.getMessages(id, { withContext: true })[0]!;
+  assert.match(stored.context ?? "", /^<context>[\s\S]*Weekend in Lisbon[\s\S]*<\/context>$/);
+  assert.equal(db.getMessages(id)[0]!.context, undefined, "the UI's message list doesn't carry the context");
+
+  await readSSE(await chat(app, { conversationId: id, message: "why wasn't it available earlier?" }));
+  const replayed: string = requests[1].input[0].content;
+  assert.equal(replayed, `${stored.context}\n\none day I have discussed a weekend in Lisbon, when was it?`);
+  const msgs = await (await app.request(`/api/conversations/${id}/messages`)).json();
+  assert.ok(!("context" in msgs.messages[0]));
+});
