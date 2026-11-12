@@ -15,13 +15,19 @@ import type { Source } from "../db.js";
 const MAX_RESULTS = 8;
 const DEFAULT_RESULTS = 5;
 const CONTENT_CHARS = 1_200;
+/**
+ * Searches restricted to a vendor's own site return fewer, longer results: an official pricing page's
+ * numbers rarely fit in a short snippet, and a missing number costs a whole extra model round (~8s).
+ */
+const DOMAIN_RESULTS = 3;
+const DOMAIN_CONTENT_CHARS = 2_400;
 const TIMEOUT_MS = 20_000;
 
 // Strict-mode function schema: every field is required, optional ones are nullable.
 export const webSearchArgs = z.strictObject({
   query: z
     .string()
-    .describe("A focused search query. Name the product, vendor or topic explicitly; add 'pricing', 'changelog', 'release notes' etc. when relevant."),
+    .describe("A focused natural-language query naming the product, vendor or topic, e.g. 'Neon Postgres pricing plans'. No search operators (site:, quotes, OR): use `domains` to target a site."),
   topic: z
     .enum(["general", "news"])
     .nullable()
@@ -30,6 +36,10 @@ export const webSearchArgs = z.strictObject({
     .string()
     .nullable()
     .describe("YYYY-MM-DD. Only return pages published on or after this date. Use for 'what changed since X'. Leave null for pricing or docs pages, which often have no publish date and would be filtered out."),
+  domains: z
+    .array(z.string())
+    .nullable()
+    .describe("Restrict results to these sites, e.g. ['neon.com'] for Neon's own pricing page. Up to 5. Use for official pricing, docs and changelogs; null to search everywhere."),
   // Plain number (no .int()/.min()): keeps the schema simple for strict mode; clamped in code.
   max_results: z
     .number()
@@ -115,6 +125,28 @@ function compactContent(s: string, max = CONTENT_CHARS): string {
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 
+/** "neon.com", "https://www.neon.com/pricing" → "neon.com"; null if it isn't a plausible host. */
+function toDomain(s: string): string | null {
+  const t = s.trim().toLowerCase().replace(/^https?:\/\//, "").replace(/^www\./, "").split(/[/?#\s]/)[0] ?? "";
+  return /^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(t) ? t : null;
+}
+
+/** Removes `site:` operators from the query (also the `site.x.com` slip) and returns them as domains, merged with `domains`. */
+export function splitSiteOperators(query: string, domains: string[]): { query: string; domains: string[] } {
+  const found: string[] = [];
+  const cleaned = query
+    .replace(/(?:^|\s)site[:.]\s*(\S+)/gi, (m, target: string) => {
+      const d = toDomain(target);
+      if (!d) return m;
+      found.push(d);
+      return " ";
+    })
+    .replace(/\s+/g, " ")
+    .trim();
+  const all = [...new Set([...domains.map(toDomain), ...found].filter((d): d is string => Boolean(d)))].slice(0, 5);
+  return { query: cleaned, domains: all };
+}
+
 let client: TavilyClient | undefined;
 function getClient(): TavilyClient {
   client ??= tavily({ apiKey: config.tavilyApiKey });
@@ -137,32 +169,37 @@ export async function webSearch(rawArgs: unknown, sources: SourceRegistry): Prom
   // Strict mode should always send every field, but treat a missing optional one as null rather than failing.
   const filled =
     rawArgs && typeof rawArgs === "object"
-      ? { topic: null, start_date: null, max_results: null, ...(rawArgs as Record<string, unknown>) }
+      ? { topic: null, start_date: null, domains: null, max_results: null, ...(rawArgs as Record<string, unknown>) }
       : rawArgs;
   const parsed = webSearchArgs.safeParse(filled);
   if (!parsed.success) return { error: `Invalid arguments: ${z.prettifyError(parsed.error)}` };
-  const { query, topic, start_date, max_results } = parsed.data;
+  const { query: rawQuery, topic, start_date, max_results } = parsed.data;
+  // Models still write `site:x.com` now and then; move those into the domain filter, where they work.
+  const { query, domains } = splitSiteOperators(rawQuery, parsed.data.domains ?? []);
   if (!query.trim()) return { error: "Empty query." };
   if (!config.tavilyApiKey) return { query, error: "Search is unavailable: TAVILY_API_KEY is not set." };
 
   const opts: TavilySearchOptions = {
-    searchDepth: "advanced",
+    searchDepth: config.searchDepth,
     topic: topic ?? "general",
-    maxResults: Math.min(Math.max(Math.round(max_results ?? DEFAULT_RESULTS), 1), MAX_RESULTS),
-    chunksPerSource: 3,
+    maxResults: Math.min(Math.max(Math.round(max_results ?? (domains.length ? DOMAIN_RESULTS : DEFAULT_RESULTS)), 1), MAX_RESULTS),
+    // Several relevant passages per page; Tavily supports this only for advanced search.
+    ...(config.searchDepth === "advanced" ? { chunksPerSource: 3 } : {}),
     includeAnswer: false,
     includeRawContent: false,
     includeImages: false,
     timeout: TIMEOUT_MS / 1000,
   };
   if (start_date && ISO_DATE.test(start_date)) opts.startDate = start_date;
+  if (domains.length) opts.includeDomains = domains;
 
   try {
     const res = await getClient().search(query, opts);
     const results = res.results.map((r) => {
       const published = normalizeDate(r.publishedDate);
       const title = r.title?.trim() || r.url;
-      return { n: sources.add({ title, url: r.url, published }), title, url: r.url, published, content: compactContent(r.content ?? "") };
+      const content = compactContent(r.content ?? "", domains.length ? DOMAIN_CONTENT_CHARS : CONTENT_CHARS);
+      return { n: sources.add({ title, url: r.url, published }), title, url: r.url, published, content };
     });
     return { query, results };
   } catch (err) {

@@ -60,13 +60,27 @@ test("search cap: extra calls get an error and the next round disables tools", a
   assert.equal(requests[1].tool_choice, "none");
 });
 
-test("round limit: the last round forces a text answer", async () => {
-  const rounds: Round[] = [{ calls: ["a"] }, { calls: ["b"] }, { calls: ["c"] }, { calls: ["d"] }, { text: "Final [1]." }];
+test("round limit: two search rounds, then the model must answer", async () => {
+  const rounds: Round[] = [{ calls: ["a"] }, { calls: ["b"] }, { text: "Final [1]." }];
   const { client, requests } = fakeClient(rounds);
   const res = await runTurn({ message: "x", history: [], context: ctx, onEvent: () => {}, deps: { client, search: fakeSearch([]) } });
-  assert.equal(requests.length, 5);
-  assert.equal(requests[4].tool_choice, "none");
+  assert.equal(requests.length, 3);
+  assert.deepEqual(requests.map((r: any) => r.tool_choice), ["auto", "auto", "none"]);
   assert.equal(res.text, "Final [1].");
+  assert.equal(res.stats.rounds, 3);
+  assert.ok(res.stats.timeline.some((t) => t.what.startsWith("search done")), "timeline records searches");
+});
+
+test("a wide first round (2+ searches) goes straight to the answer", async () => {
+  const { client, requests } = fakeClient([{ calls: ["a", "b"] }, { text: "Answer [1][2][3]." }]);
+  await runTurn({ message: "x", history: [], context: ctx, onEvent: () => {}, deps: { client, search: fakeSearch([]) } });
+  assert.deepEqual(requests.map((r: any) => r.tool_choice), ["auto", "none"]);
+});
+
+test("a narrow first round keeps the follow-up search", async () => {
+  const { client, requests } = fakeClient([{ calls: ["who makes zed"] }, { calls: ["zed industries founders"] }, { text: "Answer [2]." }]);
+  await runTurn({ message: "x", history: [], context: ctx, onEvent: () => {}, deps: { client, search: fakeSearch([]) } });
+  assert.deepEqual(requests.map((r: any) => r.tool_choice), ["auto", "auto", "none"]);
 });
 
 test("preamble text before a search is kept, separated from the answer", async () => {

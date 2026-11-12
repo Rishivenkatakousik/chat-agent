@@ -39,6 +39,13 @@ export class ChatError extends Error {
   }
 }
 
+/** One-line log form of an error: message plus the API request id, never headers or cookies. */
+function describeError(err: unknown): string {
+  if (!(err instanceof Error)) return String(err);
+  const e = err as Error & { status?: number; requestID?: string };
+  return [e.status && `HTTP ${e.status}`, e.message, e.requestID && `(request ${e.requestID})`].filter(Boolean).join(" ");
+}
+
 /** Conversations with a turn in flight; a second concurrent message to the same one is rejected. */
 const busy = new Set<string>();
 
@@ -143,7 +150,7 @@ export function startChat(req: ChatRequest): { conversationId: string; run: () =
         console.log(`[chat] ${conversationId}: client disconnected, run aborted`);
         return null;
       }
-      console.error(`[chat] ${conversationId}:`, err);
+      console.error(`[chat] ${conversationId}: ${describeError(err)}`);
       req.onEvent({ type: "error", message: friendlyError(err) });
       return null;
     } finally {

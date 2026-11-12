@@ -32,6 +32,8 @@ export interface TurnStats {
   inputTokens: number;
   cachedTokens: number;
   outputTokens: number;
+  /** Where the time went: phase markers in ms since the turn started (for logs and tuning). */
+  timeline: { at: number; what: string }[];
 }
 
 export interface TurnInput {
@@ -51,8 +53,19 @@ export interface TurnResult {
   stats: TurnStats;
 }
 
-/** Model round trips per turn (each can contain several parallel searches). */
-const MAX_ROUNDS = 5;
+/**
+ * Model rounds that may call web_search. Each round costs a full model pass (several seconds), so the
+ * model is told to search everything in parallel in round 1, with at most one follow-up round; after
+ * that it must answer.
+ */
+const MAX_SEARCH_ROUNDS = 2;
+/**
+ * A first round this wide (2+ parallel searches) already covers every item (a comparison, a "has it changed" check); a second
+ * round would only polish it, so the model answers instead and states what it couldn't confirm.
+ * Narrow first rounds keep the follow-up, which multi-step questions need ("who founded the company that…").
+ */
+const WIDE_ROUND = 2;
+const MAX_ROUNDS = MAX_SEARCH_ROUNDS + 1;
 /** Recent conversation kept verbatim; older turns are reachable through memory recall. */
 export const HISTORY_MESSAGES = 12;
 const HISTORY_CHARS = 16_000;
@@ -109,16 +122,20 @@ export async function runTurn({ message, history, context, onEvent, signal, deps
     inputTokens: 0,
     cachedTokens: 0,
     outputTokens: 0,
+    timeline: [],
   };
+  const mark = (what: string) => stats.timeline.push({ at: Math.round(performance.now() - t0), what });
 
   const input: ResponseInputItem[] = [...historyItems(history), { role: "user", content: buildUserInput(message, context) }];
   const textParts: string[] = [];
   let searchesExhausted = false;
+  let wideFirstRound = false;
 
   for (let round = 0; round < MAX_ROUNDS; round++) {
     stats.rounds = round + 1;
-    const lastRound = round === MAX_ROUNDS - 1;
-    const toolsAllowed = !searchesExhausted && !lastRound;
+    const toolsAllowed = !searchesExhausted && !wideFirstRound && round < MAX_SEARCH_ROUNDS;
+    mark(`round ${round + 1} request`);
+    let firstOutput = true;
 
     const stream = await llm.responses.create(
       {
@@ -144,6 +161,10 @@ export async function runTurn({ message, history, context, onEvent, signal, deps
     let completed: Response | undefined;
 
     for await (const ev of stream as AsyncIterable<ResponseStreamEvent>) {
+      if (firstOutput && (ev.type === "response.output_item.done" || ev.type === "response.output_text.delta")) {
+        firstOutput = false;
+        mark(`round ${round + 1} first output`);
+      }
       switch (ev.type) {
         case "response.output_text.delta": {
           if (stats.firstTokenMs == null) stats.firstTokenMs = Math.round(performance.now() - t0);
@@ -170,7 +191,17 @@ export async function runTurn({ message, history, context, onEvent, signal, deps
           } catch {
             args = null;
           }
-          pending.set(call.call_id, call.name === "web_search" ? search(args, sources) : Promise.resolve({ error: `Unknown tool ${call.name}` }));
+          const started = performance.now();
+          const domains = (args as { domains?: unknown } | null)?.domains;
+          const label = `${searchStatus(call.arguments).replace(/^Searching: /, "")}${Array.isArray(domains) && domains.length ? ` [${domains.join(", ")}]` : ""}`;
+          const job = call.name === "web_search" ? search(args, sources) : Promise.resolve({ error: `Unknown tool ${call.name}` });
+          pending.set(
+            call.call_id,
+            job.then((out) => {
+              mark(`search done in ${Math.round(performance.now() - started)}ms: ${label}${"error" in out ? " (error)" : ""}`);
+              return out;
+            }),
+          );
           break;
         }
         case "response.completed":
@@ -185,6 +216,7 @@ export async function runTurn({ message, history, context, onEvent, signal, deps
     }
 
     if (!completed) throw new Error("The model stream ended unexpectedly.");
+    mark(`round ${round + 1} complete (${completed.usage?.input_tokens ?? "?"} in / ${completed.usage?.output_tokens ?? "?"} out)`);
     const u = completed.usage;
     if (u) {
       stats.inputTokens += u.input_tokens;
@@ -206,10 +238,12 @@ export async function runTurn({ message, history, context, onEvent, signal, deps
       [...pending].map(async ([callId, p]) => ({ callId, out: await p })),
     );
     if (stats.searches >= config.maxSearchesPerTurn) searchesExhausted = true;
+    if (round === 0 && pending.size >= WIDE_ROUND) wideFirstRound = true;
     for (const { callId, out } of results) {
       input.push({ type: "function_call_output", call_id: callId, output: formatSearchOutput(out) });
     }
-    onEvent({ type: "status", text: `Reading ${sources.list().length} sources…` });
+    const found = sources.list().length;
+    onEvent({ type: "status", text: found ? `Reading ${found} sources…` : "Search returned nothing usable; answering with what I have…" });
   }
 
   const text = textParts.join("\n\n").trim();
