@@ -59,10 +59,6 @@ export async function settleBackground(): Promise<void> {
 /** How long the stream stays open after `done` waiting for a new conversation's title. */
 const TITLE_WAIT_MS = 4_000;
 
-export function isBusy(conversationId: string): boolean {
-  return busy.has(conversationId);
-}
-
 /**
  * Validates and claims the conversation synchronously (so HTTP can answer 4xx
  * before streaming starts), then returns the async run.

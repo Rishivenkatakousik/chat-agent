@@ -6,7 +6,6 @@ import {
   addWeeks,
   addYears,
   format,
-  isSameDay,
   startOfDay,
   startOfMonth,
   startOfWeek,
@@ -315,10 +314,4 @@ export function resolveTimeRefs(text: string, now: Date | number, tz: string): T
 
   found.sort((a, b) => a.index - b.index);
   return found.map(({ phrase, windows }) => ({ phrase, windows }));
-}
-
-/** True if `t` falls on the same calendar day as `now` in the user's timezone. */
-export function isToday(t: number, now: Date | number, tz: string): boolean {
-  const zone = safeTimeZone(tz);
-  return isSameDay(new TZDate(t, zone), new TZDate(toMs(now), zone));
 }
