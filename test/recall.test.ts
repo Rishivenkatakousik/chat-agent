@@ -1,9 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { openDb } from "../src/db.js";
-import { extractKeywords, hasMemoryCue, recall, type RecallResult } from "../src/agent/recall.js";
-import { resolveTimeRefs } from "../src/agent/time.js";
-import type { Embedder } from "../src/agent/embed.js";
+import type { Embedder } from "../src/llm/embeddings.js";
+import { extractKeywords, hasMemoryCue } from "../src/memory/query-analysis.js";
+import { recall, type RecallResult } from "../src/memory/recall.js";
+import { openDatabase, type Database } from "../src/storage/database.js";
+import { resolveTimeRefs } from "../src/time/resolve-time-refs.js";
 import { seedDemo } from "../scripts/seed-data.js";
 
 const TZ = "Asia/Kolkata";
@@ -23,12 +24,12 @@ const fakeEmbed: Embedder = async (text) => {
 };
 
 function setup(withEmbeddings = false) {
-  const db = openDb(":memory:");
+  const db = openDatabase(":memory:");
   const seeded = seedDemo(db, { now: NOW, timezone: TZ });
   return { db, seeded, withEmbeddings };
 }
 
-async function ask(db: ReturnType<typeof openDb>, message: string, embed?: Embedder): Promise<RecallResult> {
+async function ask(db: Database, message: string, embed?: Embedder): Promise<RecallResult> {
   const timeRefs = resolveTimeRefs(message, NOW, TZ);
   return recall({ db, message, timezone: TZ, timeRefs, embed });
 }
@@ -37,7 +38,8 @@ const titles = (r: RecallResult) => [...new Set(r.exchanges.map((e) => e.convers
 
 test("seed places conversations on the challenge dates", () => {
   const { seeded } = setup();
-  const day = (t: string) => new Date(Date.parse(seeded.days[t]!) + 5.5 * 3600_000).toISOString().slice(0, 10);
+  const day = (t: string) =>
+    new Date(Date.parse(seeded.days[t]!) + 5.5 * 3600_000).toISOString().slice(0, 10);
   assert.equal(day("Managed Postgres hosting prices"), "2026-11-03");
   assert.equal(day("CRM shortlist for a 6-person sales team"), "2026-11-09");
   assert.equal(day("Weekend in Lisbon"), "2026-11-10");
@@ -47,7 +49,10 @@ test("keywords and memory cues", () => {
   const msg = "Last Tuesday I asked about Postgres hosting. Has pricing changed?";
   assert.deepEqual(extractKeywords(msg, resolveTimeRefs(msg, NOW, TZ)), ["postgres", "hosting", "pricing"]);
   assert.deepEqual(extractKeywords("What did I ask you on 3 November? Is it still correct?"), []);
-  assert.deepEqual(extractKeywords("Is Next.js 16 faster than C++?"), ["next.js", "faster", "than", "c++"].filter((w) => w !== "than"));
+  assert.deepEqual(
+    extractKeywords("Is Next.js 16 faster than C++?"),
+    ["next.js", "faster", "than", "c++"].filter((w) => w !== "than"),
+  );
   assert.ok(hasMemoryCue("On Monday we shortlisted 5 CRM tools"));
   assert.ok(hasMemoryCue("Has anything changed since?"));
   assert.ok(!hasMemoryCue("What's new in Postgres 18?"));
@@ -80,9 +85,17 @@ test("challenge 3: ambiguous 'last Tuesday' picks the Tuesday that has Postgres,
   const r = await ask(db, "Last Tuesday I asked about Postgres hosting. Has pricing changed?");
   assert.deepEqual(titles(r), ["Managed Postgres hosting prices"]);
   assert.ok(!/Lisbon/.test(r.memory.split("## Past exchanges")[1] ?? ""), "Lisbon exchange is not recalled");
-  assert.ok(r.notes.some((n) => n.startsWith("Tue 10 Nov 2026") && /Weekend in Lisbon/.test(n) && /nothing about this topic/.test(n)));
+  assert.ok(
+    r.notes.some(
+      (n) =>
+        n.startsWith("Tue 10 Nov 2026") && /Weekend in Lisbon/.test(n) && /nothing about this topic/.test(n),
+    ),
+  );
   assert.ok(r.facts.some((f) => f.entity === "Supabase"));
-  assert.ok(!r.facts.some((f) => f.entity === "Pipedrive"), "CRM prices don't leak in through the word 'pricing'");
+  assert.ok(
+    !r.facts.some((f) => f.entity === "Pipedrive"),
+    "CRM prices don't leak in through the word 'pricing'",
+  );
   assert.match(r.memory, /Sources cited then: \[1\] https:\/\/neon.com\/pricing/);
 });
 
@@ -127,7 +140,7 @@ test("a fact search by entity name finds facts on its own", async () => {
 
 test("embeddings bridge synonyms that keywords miss", async () => {
   const { db, seeded } = setup();
-  for (const m of seeded.messages) db.setEmbedding(m.id, (await fakeEmbed(m.text))!);
+  for (const m of seeded.messages) db.messages.setEmbedding(m.id, (await fakeEmbed(m.text))!);
   const q = "Remember the contact-management apps we looked at? Anything new?";
   const withoutVec = await ask(db, q);
   assert.equal(withoutVec.exchanges.length, 0, "no keyword overlap");
@@ -142,9 +155,13 @@ test("'one day I have discussed…' with a typo and a missing space still finds 
   const { db } = setup();
   const q = "one day i have discussed about weekend in lisdon.can u give me the date when i have asked u";
   assert.ok(hasMemoryCue(q), "'i have discussed' and 'one day' are memory cues");
-  assert.deepEqual(extractKeywords(q), ["weekend", "lisdon"], "\"lisdon.can\" is split; \"can\" is a stopword");
+  assert.deepEqual(extractKeywords(q), ["weekend", "lisdon"], '"lisdon.can" is split; "can" is a stopword');
   const r = await ask(db, q);
-  assert.deepEqual(titles(r), ["Weekend in Lisbon"], "'weekend' is distinctive, so one matching word is enough with a cue");
+  assert.deepEqual(
+    titles(r),
+    ["Weekend in Lisbon"],
+    "'weekend' is distinctive, so one matching word is enough with a cue",
+  );
 });
 
 test("memory cue phrasings", () => {
@@ -156,8 +173,10 @@ test("memory cue phrasings", () => {
     "the other day you told me something",
     "what did I ask the other day",
     "I had discussed this a while ago",
-  ]) assert.ok(hasMemoryCue(q), q);
-  for (const q of ["What's new in Postgres 18?", "Explain TCP slow start", "best pizza in Lisbon"]) assert.ok(!hasMemoryCue(q), q);
+  ])
+    assert.ok(hasMemoryCue(q), q);
+  for (const q of ["What's new in Postgres 18?", "Explain TCP slow start", "best pizza in Lisbon"])
+    assert.ok(!hasMemoryCue(q), q);
 });
 
 test("a common word never recalls on its own, even with a cue", async () => {
@@ -169,7 +188,7 @@ test("a common word never recalls on its own, even with a cue", async () => {
 
 test("semantic search runs on every message, not only on cues", async () => {
   const { db, seeded } = setup();
-  for (const m of seeded.messages) db.setEmbedding(m.id, (await fakeEmbed(m.text))!);
+  for (const m of seeded.messages) db.messages.setEmbedding(m.id, (await fakeEmbed(m.text))!);
   const r = await ask(db, "Pipedrive or HubSpot for a sales team?", fakeEmbed);
   assert.equal(r.stats.cue, false);
   assert.equal(r.stats.usedEmbeddings, true);
@@ -178,7 +197,7 @@ test("semantic search runs on every message, not only on cues", async () => {
 
 test("excluded messages (already in the model's history) are not recalled", async () => {
   const { db } = setup();
-  const crm = db.getMessages("seed-crm-shortlist").map((m) => m.id);
+  const crm = db.messages.list("seed-crm-shortlist").map((m) => m.id);
   const r = await recall({
     db,
     message: "On Monday we shortlisted 5 CRM tools. Has anything changed since?",
@@ -191,7 +210,13 @@ test("excluded messages (already in the model's history) are not recalled", asyn
 
 test("memory stays within the character budget", async () => {
   const { db } = setup();
-  const r = await recall({ db, message: "What did I ask you on 3 November?", timezone: TZ, timeRefs: resolveTimeRefs("3 November", NOW, TZ), charBudget: 1_500 });
+  const r = await recall({
+    db,
+    message: "What did I ask you on 3 November?",
+    timezone: TZ,
+    timeRefs: resolveTimeRefs("3 November", NOW, TZ),
+    charBudget: 1_500,
+  });
   assert.ok(r.memory.length <= 1_500, `memory is ${r.memory.length} chars`);
   assert.ok(r.exchanges.length >= 1);
 });

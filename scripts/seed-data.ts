@@ -1,6 +1,7 @@
 import { TZDate } from "@date-fns/tz";
 import { addDays, startOfDay, startOfWeek, subDays } from "date-fns";
-import type { Db, FactInput, Source } from "../src/db.js";
+import type { Database } from "../src/storage/database.js";
+import type { FactInput, Source } from "../src/types.js";
 
 /**
  * Back-dated demo conversations for the challenge questions, placed relative
@@ -52,20 +53,52 @@ const conversations: SeedConversation[] = [
           { n: 1, title: "Neon pricing", url: "https://neon.com/pricing" },
           { n: 2, title: "Supabase pricing", url: "https://supabase.com/pricing" },
           { n: 3, title: "Render pricing", url: "https://render.com/pricing" },
-          { n: 4, title: "Amazon RDS for PostgreSQL pricing", url: "https://aws.amazon.com/rds/postgresql/pricing/" },
+          {
+            n: 4,
+            title: "Amazon RDS for PostgreSQL pricing",
+            url: "https://aws.amazon.com/rds/postgresql/pricing/",
+          },
         ],
         facts: [
-          { entity: "Neon", attribute: "Launch plan price", value: "$19/mo (10 GB storage included)", source_url: "https://neon.com/pricing" },
-          { entity: "Supabase", attribute: "Pro plan price", value: "$25/mo (8 GB database included, $0.125/GB after)", source_url: "https://supabase.com/pricing" },
-          { entity: "Render", attribute: "Postgres Basic-1gb price", value: "$19/mo, storage $0.30/GB", source_url: "https://render.com/pricing" },
-          { entity: "AWS RDS", attribute: "db.t4g.micro PostgreSQL price", value: "~$12/mo + gp3 storage ~$0.115/GB-month", source_url: "https://aws.amazon.com/rds/postgresql/pricing/" },
+          {
+            entity: "Neon",
+            attribute: "Launch plan price",
+            value: "$19/mo (10 GB storage included)",
+            source_url: "https://neon.com/pricing",
+          },
+          {
+            entity: "Supabase",
+            attribute: "Pro plan price",
+            value: "$25/mo (8 GB database included, $0.125/GB after)",
+            source_url: "https://supabase.com/pricing",
+          },
+          {
+            entity: "Render",
+            attribute: "Postgres Basic-1gb price",
+            value: "$19/mo, storage $0.30/GB",
+            source_url: "https://render.com/pricing",
+          },
+          {
+            entity: "AWS RDS",
+            attribute: "db.t4g.micro PostgreSQL price",
+            value: "~$12/mo + gp3 storage ~$0.115/GB-month",
+            source_url: "https://aws.amazon.com/rds/postgresql/pricing/",
+          },
         ],
       },
       {
         user: "Does Neon's free plan work for a staging database?",
-        assistant: "Yes. Neon's Free plan gives 0.5 GB storage per project and scales compute to zero when idle, which is fine for staging. Expect a cold start of a few hundred milliseconds after idle periods [1].",
+        assistant:
+          "Yes. Neon's Free plan gives 0.5 GB storage per project and scales compute to zero when idle, which is fine for staging. Expect a cold start of a few hundred milliseconds after idle periods [1].",
         sources: [{ n: 1, title: "Neon pricing", url: "https://neon.com/pricing" }],
-        facts: [{ entity: "Neon", attribute: "Free plan storage", value: "0.5 GB per project", source_url: "https://neon.com/pricing" }],
+        facts: [
+          {
+            entity: "Neon",
+            attribute: "Free plan storage",
+            value: "0.5 GB per project",
+            source_url: "https://neon.com/pricing",
+          },
+        ],
       },
     ],
   },
@@ -99,11 +132,36 @@ For 6 seats that's roughly $84–$174/month. Start trials with Pipedrive and Att
         ],
         facts: [
           { entity: "CRM shortlist", attribute: "tools", value: "HubSpot, Pipedrive, Attio, Folk, Zoho CRM" },
-          { entity: "HubSpot Sales Hub", attribute: "Starter price", value: "$20/seat/mo (annual)", source_url: "https://www.hubspot.com/pricing/sales" },
-          { entity: "Pipedrive", attribute: "Essential price", value: "$14/seat/mo (annual)", source_url: "https://www.pipedrive.com/en/pricing" },
-          { entity: "Attio", attribute: "Plus price", value: "$29/seat/mo (annual)", source_url: "https://attio.com/pricing" },
-          { entity: "Folk", attribute: "Standard price", value: "$20/seat/mo (annual)", source_url: "https://www.folk.app/pricing" },
-          { entity: "Zoho CRM", attribute: "Standard price", value: "$14/user/mo (annual)", source_url: "https://www.zoho.com/crm/zohocrm-pricing.html" },
+          {
+            entity: "HubSpot Sales Hub",
+            attribute: "Starter price",
+            value: "$20/seat/mo (annual)",
+            source_url: "https://www.hubspot.com/pricing/sales",
+          },
+          {
+            entity: "Pipedrive",
+            attribute: "Essential price",
+            value: "$14/seat/mo (annual)",
+            source_url: "https://www.pipedrive.com/en/pricing",
+          },
+          {
+            entity: "Attio",
+            attribute: "Plus price",
+            value: "$29/seat/mo (annual)",
+            source_url: "https://attio.com/pricing",
+          },
+          {
+            entity: "Folk",
+            attribute: "Standard price",
+            value: "$20/seat/mo (annual)",
+            source_url: "https://www.folk.app/pricing",
+          },
+          {
+            entity: "Zoho CRM",
+            attribute: "Standard price",
+            value: "$14/user/mo (annual)",
+            source_url: "https://www.zoho.com/crm/zohocrm-pricing.html",
+          },
         ],
       },
     ],
@@ -128,32 +186,71 @@ export interface SeededMessage {
   text: string;
 }
 
+export interface SeedResult {
+  messages: SeededMessage[];
+  /** Conversation title → ISO start time. */
+  days: Record<string, string>;
+}
+
+/** Time between a seeded question and its answer, and between exchanges. */
+const ANSWER_DELAY_MS = 25_000;
+const NEXT_QUESTION_DELAY_MS = 4 * 60_000;
+
 /** Removes previous demo data and inserts it again. Returns the created messages (for embedding). */
-export function seedDemo(db: Db, opts: { now: number; timezone: string }): { messages: SeededMessage[]; days: Record<string, string> } {
-  const today = startOfDay(new TZDate(opts.now, opts.timezone));
-  const messages: SeededMessage[] = [];
-  const days: Record<string, string> = {};
+export function seedDemo(db: Database, options: { now: number; timezone: string }): SeedResult {
+  const { timezone } = options;
+  const today = startOfDay(new TZDate(options.now, timezone));
+  const result: SeedResult = { messages: [], days: {} };
 
   db.transaction(() => {
-    for (const c of db.listConversations(10_000)) if (c.id.startsWith(SEED_PREFIX)) db.deleteConversation(c.id);
+    for (const conversation of db.conversations.list(10_000)) {
+      if (conversation.id.startsWith(SEED_PREFIX)) db.conversations.delete(conversation.id);
+    }
 
-    for (const conv of conversations) {
-      const day = conv.day(today);
-      const start = new TZDate(day.getFullYear(), day.getMonth(), day.getDate(), conv.hour, 0, opts.timezone).getTime();
-      days[conv.title] = new Date(start).toISOString();
-      db.createConversation({ id: conv.id, title: conv.title, timezone: opts.timezone, createdAt: start });
+    for (const seed of conversations) {
+      const day = seed.day(today);
+      const start = new TZDate(
+        day.getFullYear(),
+        day.getMonth(),
+        day.getDate(),
+        seed.hour,
+        0,
+        timezone,
+      ).getTime();
+      result.days[seed.title] = new Date(start).toISOString();
+      db.conversations.create({ id: seed.id, title: seed.title, timezone, createdAt: start });
 
-      let t = start;
-      for (const ex of conv.exchanges) {
-        const q = db.appendMessage({ conversationId: conv.id, role: "user", text: ex.user, createdAt: t });
-        t += 25_000;
-        const a = db.appendMessage({ conversationId: conv.id, role: "assistant", text: ex.assistant, sources: ex.sources, createdAt: t });
-        if (ex.facts?.length) db.insertFacts({ conversationId: conv.id, messageId: a.id, observedAt: t, facts: ex.facts });
-        messages.push({ id: q.id, text: q.text }, { id: a.id, text: a.text });
-        t += 4 * 60_000;
+      let time = start;
+      for (const exchange of seed.exchanges) {
+        const question = db.messages.append({
+          conversationId: seed.id,
+          role: "user",
+          text: exchange.user,
+          createdAt: time,
+        });
+        time += ANSWER_DELAY_MS;
+
+        const answer = db.messages.append({
+          conversationId: seed.id,
+          role: "assistant",
+          text: exchange.assistant,
+          sources: exchange.sources,
+          createdAt: time,
+        });
+        if (exchange.facts?.length) {
+          db.facts.insert({
+            conversationId: seed.id,
+            messageId: answer.id,
+            observedAt: time,
+            facts: exchange.facts,
+          });
+        }
+
+        result.messages.push({ id: question.id, text: question.text }, { id: answer.id, text: answer.text });
+        time += NEXT_QUESTION_DELAY_MS;
       }
     }
   });
 
-  return { messages, days };
+  return result;
 }

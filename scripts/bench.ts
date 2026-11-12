@@ -3,11 +3,11 @@
 // Settings come from env as usual (OPENAI_MODEL, OPENAI_REASONING_EFFORT, SEARCH_DEPTH, ...).
 // Results are appended to data/bench.jsonl so runs with different settings can be compared.
 import { appendFileSync } from "node:fs";
+import type { TurnStats } from "../src/agent/agent-loop.js";
+import { startChat } from "../src/chat/chat-service.js";
 import { config } from "../src/config.js";
-import { openDb } from "../src/db.js";
-import { startChat } from "../src/chat.js";
+import { openDatabase } from "../src/storage/database.js";
 import { seedDemo } from "./seed-data.js";
-import type { TurnStats } from "../src/agent/turn.js";
 
 const QUESTIONS = [
   "Last Tuesday I asked about Postgres hosting. Has pricing changed?",
@@ -24,52 +24,82 @@ const showTimeline = args.includes("--timeline");
 const showAnswers = args.includes("--answers");
 const timezone = "Asia/Kolkata";
 
-const db = openDb(":memory:");
+const db = openDatabase(":memory:");
 seedDemo(db, { now: Date.now(), timezone });
 
-const rows: { q: string; firstTokenMs: number | null; totalMs: number; searches: number; rounds: number; chars: number }[] = [];
+interface BenchRow {
+  q: string;
+  firstTokenMs: number | null;
+  totalMs: number;
+  searches: number;
+  rounds: number;
+  chars: number;
+}
+
+const rows: BenchRow[] = [];
 const questions = Number.isInteger(only) ? [QUESTIONS[only]!] : QUESTIONS;
 
-for (const q of questions) {
+for (const question of questions) {
   let stats: TurnStats | undefined;
   let text = "";
   let error = "";
-  const t0 = performance.now();
+  const startedAt = performance.now();
+
   const { run } = startChat({
     db,
-    message: q,
+    message: question,
     timezone,
-    onEvent: (e) => {
-      if (e.type === "done") ((stats = e.stats), (text = e.text));
-      if (e.type === "error") error = e.message;
+    onEvent: (event) => {
+      if (event.type === "done") {
+        stats = event.stats;
+        text = event.text;
+      }
+      if (event.type === "error") error = event.message;
     },
   });
   await run();
-  const wall = Math.round(performance.now() - t0);
+  const wallMs = Math.round(performance.now() - startedAt);
+
   if (!stats) {
-    console.log(`✖ ${q}\n  ${error}`);
+    console.log(`✖ ${question}\n  ${error}`);
     continue;
   }
-  rows.push({ q, firstTokenMs: stats.firstTokenMs, totalMs: stats.totalMs, searches: stats.searches, rounds: stats.rounds, chars: text.length });
+
+  rows.push({
+    q: question,
+    firstTokenMs: stats.firstTokenMs,
+    totalMs: stats.totalMs,
+    searches: stats.searches,
+    rounds: stats.rounds,
+    chars: text.length,
+  });
   console.log(
-    `${String(stats.firstTokenMs ?? "-").padStart(6)}ms first token · ${String(stats.totalMs).padStart(6)}ms answer · ${wall}ms incl. recall · ` +
-      `${stats.searches} searches · ${stats.rounds} rounds · ${text.length} chars · in ${stats.inputTokens} (cached ${stats.cachedTokens}) out ${stats.outputTokens}\n  ${q}`,
+    `${String(stats.firstTokenMs ?? "-").padStart(6)}ms first token · ${String(stats.totalMs).padStart(6)}ms answer · ` +
+      `${wallMs}ms incl. recall · ${stats.searches} searches · ${stats.rounds} rounds · ${text.length} chars · ` +
+      `in ${stats.inputTokens} (cached ${stats.cachedTokens}) out ${stats.outputTokens}\n  ${question}`,
   );
-  if (showTimeline) for (const t of stats.timeline) console.log(`    ${String(t.at).padStart(6)}ms  ${t.what}`);
+  if (showTimeline) {
+    for (const mark of stats.timeline) console.log(`    ${String(mark.at).padStart(6)}ms  ${mark.what}`);
+  }
   if (showAnswers) console.log(`\n${text.replace(/^/gm, "    │ ")}\n`);
 }
 
-const avg = (xs: number[]) => Math.round(xs.reduce((a, b) => a + b, 0) / Math.max(xs.length, 1));
+const average = (values: number[]) =>
+  Math.round(values.reduce((sum, value) => sum + value, 0) / Math.max(values.length, 1));
 const summary = {
   label,
   at: new Date().toISOString(),
   model: config.chatModel,
   effort: config.reasoningEffort,
-  avgFirstTokenMs: avg(rows.map((r) => r.firstTokenMs ?? r.totalMs)),
-  avgTotalMs: avg(rows.map((r) => r.totalMs)),
-  avgSearches: Number((rows.reduce((a, r) => a + r.searches, 0) / Math.max(rows.length, 1)).toFixed(1)),
+  avgFirstTokenMs: average(rows.map((row) => row.firstTokenMs ?? row.totalMs)),
+  avgTotalMs: average(rows.map((row) => row.totalMs)),
+  avgSearches: Number(
+    (rows.reduce((sum, row) => sum + row.searches, 0) / Math.max(rows.length, 1)).toFixed(1),
+  ),
   rows,
 };
-console.log(`\n[${label}] avg first token ${summary.avgFirstTokenMs}ms · avg answer ${summary.avgTotalMs}ms · avg searches ${summary.avgSearches}`);
+console.log(
+  `\n[${label}] avg first token ${summary.avgFirstTokenMs}ms · avg answer ${summary.avgTotalMs}ms · avg searches ${summary.avgSearches}`,
+);
 appendFileSync("data/bench.jsonl", JSON.stringify(summary) + "\n");
 process.exit(0);

@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { describeNow, resolveTimeRefs, safeTimeZone, type TimeRef } from "../src/agent/time.js";
+import { describeNow, safeTimeZone } from "../src/time/format.js";
+import { resolveTimeRefs } from "../src/time/resolve-time-refs.js";
+import type { TimeRef } from "../src/types.js";
 
 const IST = "Asia/Kolkata";
 // Wednesday 11 Nov 2026, 12:30 IST
@@ -24,7 +26,10 @@ test("describeNow", () => {
 test("challenge: 'On Monday we shortlisted 5 CRM tools' → Mon 9 Nov", () => {
   const r = one("On Monday we shortlisted 5 CRM tools. Has anything changed since?");
   assert.equal(r.phrase, "Monday");
-  assert.deepEqual(r.windows.map((w) => w.label), ["Mon 9 Nov 2026"]);
+  assert.deepEqual(
+    r.windows.map((w) => w.label),
+    ["Mon 9 Nov 2026"],
+  );
   assert.equal(r.windows[0]!.start, Date.parse("2026-11-08T18:30:00Z")); // IST midnight
   assert.equal(r.windows[0]!.end, Date.parse("2026-11-09T18:30:00Z"));
 });
@@ -32,13 +37,19 @@ test("challenge: 'On Monday we shortlisted 5 CRM tools' → Mon 9 Nov", () => {
 test("challenge: 'What did I ask you on 3 November?' → Tue 3 Nov", () => {
   const r = one("What did I ask you on 3 November? Is it still correct?");
   assert.equal(r.phrase, "3 November");
-  assert.deepEqual(r.windows.map((w) => w.label), ["Tue 3 Nov 2026"]);
+  assert.deepEqual(
+    r.windows.map((w) => w.label),
+    ["Tue 3 Nov 2026"],
+  );
 });
 
 test("challenge: 'Last Tuesday' on a Wednesday is ambiguous → Tue 10 Nov and Tue 3 Nov", () => {
   const r = one("Last Tuesday I asked about Postgres hosting. Has pricing changed?");
   assert.equal(r.phrase, "Last Tuesday");
-  assert.deepEqual(r.windows.map((w) => w.label), ["Tue 10 Nov 2026", "Tue 3 Nov 2026"]);
+  assert.deepEqual(
+    r.windows.map((w) => w.label),
+    ["Tue 10 Nov 2026", "Tue 3 Nov 2026"],
+  );
 });
 
 // ── Relative phrases ──
@@ -46,11 +57,19 @@ test("challenge: 'Last Tuesday' on a Wednesday is ambiguous → Tue 10 Nov and T
 test("yesterday / day before yesterday / earlier today", () => {
   assert.deepEqual(labels(resolveTimeRefs("yesterday", NOW, IST)), [["Tue 10 Nov 2026"]]);
   assert.deepEqual(labels(resolveTimeRefs("the day before yesterday", NOW, IST)), [["Mon 9 Nov 2026"]]);
-  assert.deepEqual(labels(resolveTimeRefs("what did we discuss earlier today", NOW, IST)), [["Wed 11 Nov 2026"]]);
+  assert.deepEqual(labels(resolveTimeRefs("what did we discuss earlier today", NOW, IST)), [
+    ["Wed 11 Nov 2026"],
+  ]);
 });
 
 test("bare 'today', future and non-time text yield nothing", () => {
-  for (const t of ["what's the weather today", "next Monday let's meet", "tomorrow", "Postgres hosting prices", "I may switch to Neon"]) {
+  for (const t of [
+    "what's the weather today",
+    "next Monday let's meet",
+    "tomorrow",
+    "Postgres hosting prices",
+    "I may switch to Neon",
+  ]) {
     assert.deepEqual(resolveTimeRefs(t, NOW, IST), [], t);
   }
 });
@@ -63,8 +82,12 @@ test("N days / weeks / months ago", () => {
 });
 
 test("rolling ranges", () => {
-  assert.deepEqual(labels(resolveTimeRefs("in the past 3 days", NOW, IST)), [["Sun 8 Nov – Wed 11 Nov 2026"]]);
-  assert.deepEqual(labels(resolveTimeRefs("over the past week", NOW, IST)), [["Wed 4 Nov – Wed 11 Nov 2026"]]);
+  assert.deepEqual(labels(resolveTimeRefs("in the past 3 days", NOW, IST)), [
+    ["Sun 8 Nov – Wed 11 Nov 2026"],
+  ]);
+  assert.deepEqual(labels(resolveTimeRefs("over the past week", NOW, IST)), [
+    ["Wed 4 Nov – Wed 11 Nov 2026"],
+  ]);
 });
 
 test("calendar weeks and months (weeks start Monday)", () => {
@@ -87,7 +110,9 @@ test("weekday variants", () => {
 
 test("same weekday as today", () => {
   // "Wednesday" said on a Wednesday: a week ago first, today as the fallback.
-  assert.deepEqual(labels(resolveTimeRefs("on Wednesday", NOW, IST)), [["Wed 4 Nov 2026", "Wed 11 Nov 2026"]]);
+  assert.deepEqual(labels(resolveTimeRefs("on Wednesday", NOW, IST)), [
+    ["Wed 4 Nov 2026", "Wed 11 Nov 2026"],
+  ]);
   // "last Wednesday" said on a Wednesday: exactly a week ago.
   assert.deepEqual(labels(resolveTimeRefs("last Wednesday", NOW, IST)), [["Wed 4 Nov 2026"]]);
 });
@@ -101,12 +126,17 @@ test("absolute date formats", () => {
 });
 
 test("a date without a year that would be in the future rolls back a year", () => {
-  assert.deepEqual(labels(resolveTimeRefs("what did I ask on 25 December?", NOW, IST)), [["Thu 25 Dec 2025"]]);
+  assert.deepEqual(labels(resolveTimeRefs("what did I ask on 25 December?", NOW, IST)), [
+    ["Thu 25 Dec 2025"],
+  ]);
 });
 
 test("multiple references keep text order", () => {
   const refs = resolveTimeRefs("Compare what you said on 3 November with yesterday", NOW, IST);
-  assert.deepEqual(refs.map((r) => r.phrase), ["3 November", "yesterday"]);
+  assert.deepEqual(
+    refs.map((r) => r.phrase),
+    ["3 November", "yesterday"],
+  );
 });
 
 // ── Timezone and day boundaries ──

@@ -1,12 +1,13 @@
-import { describeNow, type TimeRef } from "./time.js";
-import { format } from "date-fns";
-import { TZDate } from "@date-fns/tz";
-
 /**
- * The system prompt is fully static (no dates, no user data) so OpenAI's
- * automatic prompt caching can reuse it across every turn. Everything that
- * changes per turn goes in the <context> block in front of the user's message.
+ * What the model reads.
+ *
+ * The system prompt is fully static (no dates, no user data) so OpenAI's automatic prompt
+ * caching can reuse it across every turn. Everything that changes per turn goes in the
+ * <context> block placed in front of the user's message.
  */
+import { describeNow, formatIsoDay } from "../time/format.js";
+import type { TimeRef } from "../types.js";
+
 export const SYSTEM_PROMPT = `You are Minimi, a sharp research assistant with one tool: web_search. You also have a memory of past conversations with this user, which is provided to you (you cannot search it yourself).
 
 # Style
@@ -55,35 +56,31 @@ export interface ContextInput {
   memory?: string | null;
 }
 
-function isoDay(ms: number, tz: string): string {
-  return format(new TZDate(ms, tz), "yyyy-MM-dd");
+/** `- "last Tuesday" = Tue 10 Nov 2026 [2026-11-10]`, or "is ambiguous: … or …" for several candidates. */
+function describeTimeRef(ref: TimeRef, timezone: string): string {
+  const options = ref.windows.map((window) => `${window.label} [${formatIsoDay(window.start, timezone)}]`);
+  if (options.length > 1) return `- "${ref.phrase}" is ambiguous: ${options.join(" or ")}`;
+  return `- "${ref.phrase}" = ${options[0]}`;
 }
 
-/** Per-turn context placed in front of the user's message. */
+/** The per-turn <context> block placed in front of the user's message. */
 export function buildContext({ now, timezone, timeRefs = [], memory }: ContextInput): string {
-  const lines = [`<context>`, `Current time: ${describeNow(now, timezone)}`];
+  const lines = ["<context>", `Current time: ${describeNow(now, timezone)}`];
 
-  if (timeRefs.length) {
+  if (timeRefs.length > 0) {
     lines.push("Dates referred to in the message:");
-    for (const ref of timeRefs) {
-      const options = ref.windows.map((w) => `${w.label} [${isoDay(w.start, timezone)}]`);
-      lines.push(
-        options.length > 1
-          ? `- "${ref.phrase}" is ambiguous: ${options.join(" or ")}`
-          : `- "${ref.phrase}" = ${options[0]}`,
-      );
-    }
+    for (const ref of timeRefs) lines.push(describeTimeRef(ref, timezone));
   }
 
   if (memory != null) {
     lines.push("<memory>", memory.trim() || "No relevant past conversations found.", "</memory>");
   }
 
-  lines.push(`</context>`);
+  lines.push("</context>");
   return lines.join("\n");
 }
 
 /** The final user input: context block, then the user's own words. */
-export function buildUserInput(message: string, ctx: ContextInput): string {
-  return `${buildContext(ctx)}\n\n${message}`;
+export function buildUserInput(message: string, context: ContextInput): string {
+  return `${buildContext(context)}\n\n${message}`;
 }

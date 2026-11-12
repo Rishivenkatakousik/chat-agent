@@ -1,49 +1,58 @@
+/**
+ * App configuration, read once from environment variables (and `.env`, if present).
+ * Every other module imports `config` from here instead of reading `process.env` itself.
+ */
+
 // Load .env without a dependency (Node >= 21.7). A missing file is fine: env may come from the shell.
 try {
   process.loadEnvFile();
 } catch {
-  /* no .env file */
+  // No .env file.
 }
 
-export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high";
-export type SearchDepth = "basic" | "advanced";
+const REASONING_EFFORTS = ["none", "minimal", "low", "medium", "high"] as const;
+const SEARCH_DEPTHS = ["basic", "advanced"] as const;
 
-function str(name: string, fallback: string): string {
-  const v = process.env[name]?.trim();
-  return v ? v : fallback;
+export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
+export type SearchDepth = (typeof SEARCH_DEPTHS)[number];
+
+// ── Readers: each returns the fallback when the variable is missing or invalid ──
+
+function readEnv(name: string): string | undefined {
+  const value = process.env[name]?.trim();
+  return value ? value : undefined;
 }
 
-function int(name: string, fallback: number): number {
-  const n = Number(process.env[name]);
-  return Number.isInteger(n) && n > 0 ? n : fallback;
+function readString(name: string, fallback: string): string {
+  return readEnv(name) ?? fallback;
 }
 
-function effort(name: string, fallback: ReasoningEffort): ReasoningEffort {
-  const v = process.env[name]?.trim();
-  return v === "none" || v === "minimal" || v === "low" || v === "medium" || v === "high" ? v : fallback;
+function readPositiveInt(name: string, fallback: number): number {
+  const value = Number(process.env[name]);
+  return Number.isInteger(value) && value > 0 ? value : fallback;
 }
 
-function depth(name: string, fallback: SearchDepth): SearchDepth {
-  const v = process.env[name]?.trim();
-  return v === "basic" || v === "advanced" ? v : fallback;
+function readEnum<T extends string>(name: string, allowed: readonly T[], fallback: T): T {
+  const value = readEnv(name);
+  return allowed.includes(value as T) ? (value as T) : fallback;
 }
 
 export const config = {
-  port: int("PORT", 3000),
-  dbPath: str("DB_PATH", "./data/minimi.db"),
+  port: readPositiveInt("PORT", 3000),
+  dbPath: readString("DB_PATH", "./data/minimi.db"),
 
-  openaiApiKey: process.env.OPENAI_API_KEY?.trim() ?? "",
-  tavilyApiKey: process.env.TAVILY_API_KEY?.trim() ?? "",
+  openaiApiKey: readString("OPENAI_API_KEY", ""),
+  tavilyApiKey: readString("TAVILY_API_KEY", ""),
 
   /** Main chat model. gpt-6.1-sol balances quality and latency; gpt-6-astra is the flagship. */
-  chatModel: str("OPENAI_MODEL", "gpt-6.1-sol"),
-  reasoningEffort: effort("OPENAI_REASONING_EFFORT", "low"),
+  chatModel: readString("OPENAI_MODEL", "gpt-6.1-sol"),
+  reasoningEffort: readEnum("OPENAI_REASONING_EFFORT", REASONING_EFFORTS, "low"),
   /** Cheap model for off-critical-path work: fact extraction, conversation titles. */
-  extractModel: str("OPENAI_EXTRACT_MODEL", "gpt-6-luna"),
-  embeddingModel: str("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small"),
+  extractModel: readString("OPENAI_EXTRACT_MODEL", "gpt-6-luna"),
+  embeddingModel: readString("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small"),
 
   /** Tavily search depth: "advanced" ranks and extracts better, "basic" is faster. */
-  searchDepth: depth("SEARCH_DEPTH", "advanced"),
+  searchDepth: readEnum("SEARCH_DEPTH", SEARCH_DEPTHS, "advanced"),
 
   /** Hard cap on web searches in one user turn (keeps latency and cost bounded). */
   maxSearchesPerTurn: 6,
@@ -51,7 +60,7 @@ export const config = {
   memoryCharBudget: 14_000,
 } as const;
 
-/** Missing required keys, so the server can warn on startup and the UI can show a clear error. */
+/** Required keys that are not set, so the server can warn on startup and the UI can show a clear error. */
 export function missingKeys(): string[] {
   const missing: string[] = [];
   if (!config.openaiApiKey) missing.push("OPENAI_API_KEY");
