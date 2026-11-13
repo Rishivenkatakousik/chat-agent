@@ -175,3 +175,47 @@ test("Monday-start weeks: 'last Sunday' on a Monday is yesterday only", () => {
   assert.deepEqual(labels(resolveTimeRefs("last Sunday", mon, IST)), [["Sun 15 Nov 2026"]]);
   assert.deepEqual(labels(resolveTimeRefs("last Tuesday", mon, IST)), [["Tue 10 Nov 2026"]]);
 });
+
+// ── Phrasings that used to resolve wrongly or not at all (now = Wed 11 Nov 2026) ──
+
+test("weekday phrasings that are not the most recent weekday", () => {
+  const day = (text: string) => one(text).windows.map((w) => w.label);
+  assert.deepEqual(day("Tuesday before last I asked about hosting"), ["Tue 3 Nov 2026"]);
+  assert.deepEqual(day("two Tuesdays ago I asked about hosting"), ["Tue 3 Nov 2026"]);
+  assert.deepEqual(day("what did I ask you on Tuesday the 3rd"), ["Tue 3 Nov 2026"]);
+  assert.deepEqual(day("previous Tuesday I asked about hosting"), ["Tue 10 Nov 2026", "Tue 3 Nov 2026"]);
+  // A weekday in front of a full date is redundant: only the date counts.
+  assert.deepEqual(day("what did I ask on Tuesday 3 November?"), ["Tue 3 Nov 2026"]);
+});
+
+test("day of the month and numeric dates", () => {
+  const day = (text: string) => one(text).windows.map((w) => w.label);
+  assert.deepEqual(day("what did we discuss on the 3rd?"), ["Tue 3 Nov 2026"]);
+  assert.deepEqual(
+    day("what did we discuss on the 20th?"),
+    ["Tue 20 Oct 2026"],
+    "not reached yet this month",
+  );
+  // Day-first or month-first: both are kept and memory decides.
+  assert.deepEqual(day("what did I ask on 3/11?"), ["Tue 3 Nov 2026", "Wed 11 Mar 2026"]);
+  assert.deepEqual(day("what did I ask on 25/10/2026?"), ["Sun 25 Oct 2026"]);
+  for (const text of ["is support available 24/7?", "which was the 2nd tool you listed?", "I'd rate it 9/10"])
+    assert.deepEqual(resolveTimeRefs(text, NOW, IST), [], text);
+});
+
+test("nights, weekends, fortnights and other loose phrasings", () => {
+  const day = (text: string) => one(text).windows.map((w) => w.label);
+  assert.deepEqual(day("what did we talk about last night?"), ["Tue 10 Nov 2026"]);
+  assert.deepEqual(day("what did I ask an hour ago?"), ["Wed 11 Nov 2026"]);
+  assert.deepEqual(day("a couple of days back I asked about Neon"), ["Mon 9 Nov 2026"]);
+  assert.deepEqual(day("last weekend we compared laptops"), ["Sat 7 Nov – Sun 8 Nov 2026"]);
+  assert.deepEqual(day("what did we cover over the weekend?"), ["Sat 7 Nov – Sun 8 Nov 2026"]);
+  assert.deepEqual(day("the week before last we discussed hosting"), ["Mon 26 Oct – Sun 1 Nov 2026"]);
+  assert.deepEqual(day("a fortnight ago I asked about CRMs"), ["around Wed 28 Oct 2026"]);
+  assert.deepEqual(day("at the start of the month we picked a CRM"), ["November 2026"]);
+  assert.deepEqual(
+    resolveTimeRefs("we discussed the weekend in Lisbon", NOW, IST),
+    [],
+    "a topic, not a date",
+  );
+});

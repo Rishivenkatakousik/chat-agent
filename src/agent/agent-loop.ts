@@ -11,8 +11,9 @@ import type {
   ResponseInputItem,
   ResponseStreamEvent,
 } from "openai/resources/responses/responses";
+import { APIError } from "openai";
 import { config } from "../config.js";
-import { getOpenAI, type ResponsesClient } from "../llm/openai-client.js";
+import { getOpenAI, UserFacingError, type ResponsesClient } from "../llm/openai-client.js";
 import { SourceRegistry } from "../search/sources.js";
 import {
   formatSearchOutput,
@@ -82,7 +83,8 @@ const MAX_ROUNDS = MAX_SEARCH_ROUNDS + 1;
  * A first round this wide (2+ parallel searches) already covers every item (a comparison, a "has it
  * changed" check); a second round would only polish it, so the model answers instead and states what
  * it couldn't confirm. Narrow first rounds keep the follow-up, which multi-step questions need
- * ("who founded the company that…").
+ * ("who founded the company that…"). So does a wide round in which a search failed (timeout, rate
+ * limit): the model gets one more round to try again.
  */
 const WIDE_ROUND_SEARCHES = 2;
 const PROMPT_CACHE_KEY = "minimi-chat";
@@ -164,16 +166,19 @@ class TurnRunner {
   private readonly client: ResponsesClient;
   private readonly search: WebSearchFunction;
   private readonly tracker = new TurnTracker();
-  private readonly sources = new SourceRegistry();
+  /** Starts from the sources of earlier answers, so citation numbers continue across the conversation. */
+  private readonly sources: SourceRegistry;
   /** Everything sent to the model: history, this question, then each round's output and search results. */
   private readonly modelInput: ResponseInputItem[];
   /** Text from each round (a preamble before searching, then the answer). */
   private readonly textParts: string[] = [];
   private searchesExhausted = false;
   private wideFirstRound = false;
+  private textDeltas = 0;
 
   constructor(turn: TurnInput) {
     this.turn = turn;
+    this.sources = new SourceRegistry(turn.history.flatMap((message) => message.sources));
     this.client = turn.deps?.client ?? getOpenAI();
     this.search = turn.deps?.search ?? webSearch;
     this.modelInput = [
@@ -187,7 +192,7 @@ class TurnRunner {
       this.tracker.stats.rounds = roundIndex + 1;
       const toolsAllowed = !this.searchesExhausted && !this.wideFirstRound && roundIndex < MAX_SEARCH_ROUNDS;
 
-      const round = await this.runRound(roundIndex + 1, toolsAllowed);
+      const round = await this.runRoundWithRetry(roundIndex + 1, toolsAllowed);
       if (round.text) this.textParts.push(round.text);
 
       if (round.searches.size === 0) {
@@ -197,6 +202,25 @@ class TurnRunner {
       await this.feedSearchResults(round);
     }
     return this.finish();
+  }
+
+  /**
+   * Runs a round, and once more if it failed before streaming any text (a 5xx, a dropped stream).
+   * By round 2 the searches are already paid for, so giving up on the first hiccup wastes the turn.
+   * Client errors (bad key, unknown model, rate limit after the SDK's own retries) are not retried.
+   */
+  private async runRoundWithRetry(number: number, toolsAllowed: boolean): Promise<Round> {
+    const deltasBefore = this.textDeltas;
+    try {
+      return await this.runRound(number, toolsAllowed);
+    } catch (error) {
+      const isClientError = error instanceof APIError && error.status !== undefined && error.status < 500;
+      const nothingShown = this.textDeltas === deltasBefore;
+      if (this.turn.signal?.aborted || isClientError || !nothingShown) throw error;
+
+      this.tracker.mark(`round ${number} failed, retrying once`);
+      return this.runRound(number, toolsAllowed);
+    }
   }
 
   /** Streams one model round to the end and returns what it produced. */
@@ -232,7 +256,7 @@ class TurnRunner {
       this.handleStreamEvent(event, round);
     }
 
-    if (!round.response) throw new Error("The model stream ended unexpectedly.");
+    if (!round.response) throw new UserFacingError("The model stream ended unexpectedly.");
     const usage = round.response.usage;
     this.tracker.mark(
       `round ${number} complete (${usage?.input_tokens ?? "?"} in / ${usage?.output_tokens ?? "?"} out)`,
@@ -257,14 +281,15 @@ class TurnRunner {
         round.response = event.response;
         break;
       case "response.failed":
-        throw new Error(event.response.error?.message ?? "The model failed to respond.");
+        throw new UserFacingError(event.response.error?.message ?? "The model failed to respond.");
       case "error":
-        throw new Error(event.message);
+        throw new UserFacingError(event.message);
     }
   }
 
   private emitText(delta: string, round: Round): void {
     this.tracker.recordFirstToken();
+    this.textDeltas++;
     // Separate this round's text from an earlier round's (e.g. a preamble before searching).
     const isFirstDeltaAfterEarlierText = round.text === "" && this.textParts.length > 0;
     round.text += delta;
@@ -302,7 +327,10 @@ class TurnRunner {
     );
 
     if (this.tracker.stats.searches >= config.maxSearchesPerTurn) this.searchesExhausted = true;
-    if (round.number === 1 && round.searches.size >= WIDE_ROUND_SEARCHES) this.wideFirstRound = true;
+    const anyFailed = results.some(({ output }) => "error" in output);
+    if (round.number === 1 && round.searches.size >= WIDE_ROUND_SEARCHES && !anyFailed) {
+      this.wideFirstRound = true;
+    }
 
     for (const { callId, output } of results) {
       this.modelInput.push({
@@ -312,7 +340,7 @@ class TurnRunner {
       });
     }
 
-    const found = this.sources.list().length;
+    const found = this.sources.foundThisTurn;
     const status =
       found > 0 ? `Reading ${found} sources…` : "Search returned nothing usable; answering with what I have…";
     this.turn.onEvent({ type: "status", text: status });
@@ -322,13 +350,13 @@ class TurnRunner {
   private assertAnswered(response: Response): void {
     if (response.status === "incomplete" && this.textParts.length === 0) {
       const reason = response.incomplete_details?.reason ?? "unknown reason";
-      throw new Error(`The model stopped early (${reason}).`);
+      throw new UserFacingError(`The model stopped early (${reason}).`);
     }
   }
 
   private finish(): TurnResult {
     const text = this.textParts.join("\n\n").trim();
-    if (!text) throw new Error("The model returned an empty answer.");
+    if (!text) throw new UserFacingError("The model returned an empty answer.");
 
     const cited = this.sources.cited(text);
     const stats = this.tracker.stats;

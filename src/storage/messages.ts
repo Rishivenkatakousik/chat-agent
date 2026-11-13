@@ -145,19 +145,30 @@ export class MessageStore {
     return this.getByIds(reply ? [questionId, Number(reply.id)] : [questionId]);
   }
 
-  /** Messages created inside the window, oldest first. */
+  /** Messages created inside the window, oldest first. A window with more than `limit` keeps the newest. */
   listInWindow(window: TimeWindow, limit = 200): Message[] {
     const rows = queryAll(
       this.connection,
       `SELECT ${MESSAGE_COLUMNS} FROM messages m
        WHERE m.created_at >= ? AND m.created_at < ?
-       ORDER BY m.created_at, m.id
+       ORDER BY m.created_at DESC, m.id DESC
        LIMIT ?`,
       window.start,
       window.end,
       limit,
     );
-    return rows.map(toMessage);
+    return rows.map(toMessage).reverse();
+  }
+
+  /** How many user questions fall inside the window (so recall can say "showing 8 of 30"). */
+  countQuestionsInWindow(window: TimeWindow): number {
+    const row = queryOne(
+      this.connection,
+      "SELECT count(*) AS n FROM messages WHERE role = 'user' AND created_at >= ? AND created_at < ?",
+      window.start,
+      window.end,
+    );
+    return Number(row?.n ?? 0);
   }
 
   // ── Full-text search ────────────────────────────────────────────
@@ -207,14 +218,11 @@ export class MessageStore {
     return row != null;
   }
 
-  /** Every stored embedding, optionally inside a time window. */
-  listEmbeddings(window?: TimeWindow): EmbeddingRow[] {
-    const timeFilter = windowClause("created_at", window);
+  /** Every stored embedding. */
+  listEmbeddings(): EmbeddingRow[] {
     const rows = queryAll(
       this.connection,
-      `SELECT id, conversation_id, role, created_at, embedding FROM messages
-       WHERE embedding IS NOT NULL${timeFilter.sql}`,
-      ...timeFilter.params,
+      "SELECT id, conversation_id, role, created_at, embedding FROM messages WHERE embedding IS NOT NULL",
     );
     return rows.map((row) => ({
       id: Number(row.id),
@@ -253,12 +261,16 @@ export class MessageStore {
     );
   }
 
-  /** The first assistant message after (createdAt, id) in the conversation. */
+  /**
+   * The answer to the question at (createdAt, id): the very next message, if it is an assistant
+   * message. A question that was never answered (stopped or failed) has no reply, and must not
+   * borrow the answer to a later question.
+   */
   private findReplyAfter(conversationId: string, createdAt: number, id: number): Row | undefined {
-    return queryOne(
+    const next = queryOne(
       this.connection,
-      `SELECT id FROM messages
-       WHERE conversation_id = ? AND role = 'assistant'
+      `SELECT id, role FROM messages
+       WHERE conversation_id = ?
          AND (created_at > ? OR (created_at = ? AND id > ?))
        ORDER BY created_at, id
        LIMIT 1`,
@@ -267,5 +279,6 @@ export class MessageStore {
       createdAt,
       id,
     );
+    return next?.role === "assistant" ? next : undefined;
   }
 }

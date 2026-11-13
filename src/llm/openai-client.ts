@@ -19,8 +19,12 @@ export function getOpenAI(): OpenAI {
   return client;
 }
 
+/** An error whose message was written for the user and is safe to show in the UI. */
+export class UserFacingError extends Error {}
+
 /** A user-facing message for a failure. Details go to the server log instead. */
 export function friendlyError(error: unknown): string {
+  if (error instanceof UserFacingError) return error.message;
   if (error instanceof APIUserAbortError) return "Request cancelled.";
 
   if (error instanceof APIError) {
@@ -34,7 +38,8 @@ export function friendlyError(error: unknown): string {
     return `OpenAI error: ${error.message}`;
   }
 
-  return error instanceof Error ? error.message : String(error);
+  // Anything else (a database error, a bug) may carry internal details: keep those in the log.
+  return "Something went wrong on the server. The server log has the details.";
 }
 
 /** One-line log form of an error: HTTP status, message and API request id. Never headers or cookies. */

@@ -1,6 +1,7 @@
 /**
- * Citation numbering for one turn. Every search result gets a number [n]; the same URL keeps
- * its number across searches, so the model's citations and the UI's source chips match.
+ * Citation numbering. Every search result gets a number [n]; the same URL keeps its number, and
+ * numbers continue across the turns of a conversation, so an [n] in an earlier answer still
+ * points at the same page when a follow-up cites it again.
  */
 import type { Source } from "../types.js";
 
@@ -20,6 +21,17 @@ export function normalizeUrl(url: string): string {
 
 export class SourceRegistry {
   private readonly byUrl = new Map<string, Source>();
+  private nextNumber = 1;
+  /** How many new pages this turn's searches found (earlier turns' sources not counted). */
+  foundThisTurn = 0;
+
+  /** `earlier`: sources cited in earlier answers of this conversation, which keep their numbers. */
+  constructor(earlier: readonly Source[] = []) {
+    for (const source of earlier) {
+      this.byUrl.set(normalizeUrl(source.url), source);
+      this.nextNumber = Math.max(this.nextNumber, source.n + 1);
+    }
+  }
 
   /** Returns the citation number for this page, assigning the next one if it's new. */
   add(result: { title: string; url: string; published: string | null }): number {
@@ -27,20 +39,16 @@ export class SourceRegistry {
     const existing = this.byUrl.get(key);
     if (existing) return existing.n;
 
-    const source: Source = { n: this.byUrl.size + 1, title: result.title, url: result.url };
+    const source: Source = { n: this.nextNumber++, title: result.title, url: result.url };
     if (result.published) source.published = result.published;
     this.byUrl.set(key, source);
+    this.foundThisTurn++;
     return source.n;
   }
 
-  list(): Source[] {
-    return [...this.byUrl.values()];
-  }
-
-  /** Only the sources the answer actually cites, keeping their numbers. All of them if none are cited. */
+  /** The sources the answer actually cites, by number. */
   cited(answer: string): Source[] {
     const citedNumbers = new Set([...answer.matchAll(/\[(\d+)\]/g)].map((match) => Number(match[1])));
-    const all = this.list();
-    return citedNumbers.size > 0 ? all.filter((source) => citedNumbers.has(source.n)) : all;
+    return [...this.byUrl.values()].filter((source) => citedNumbers.has(source.n)).sort((a, b) => a.n - b.n);
   }
 }

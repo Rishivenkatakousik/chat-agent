@@ -104,7 +104,7 @@ const conversations: SeedConversation[] = [
   },
   {
     id: `${SEED_PREFIX}crm-shortlist`,
-    title: "CRM shortlist for a 6-person sales team",
+    title: "CRM shortlist for a 20-person sales team",
     // Most recent Monday strictly before today
     day: (today) => {
       const diff = (today.getDay() - 1 + 7) % 7 || 7;
@@ -113,8 +113,8 @@ const conversations: SeedConversation[] = [
     hour: 15,
     exchanges: [
       {
-        user: "We're a 6-person B2B sales team moving off spreadsheets. Shortlist 5 CRM tools with per-seat pricing.",
-        assistant: `Here's a shortlist of 5 CRMs that fit a 6-person B2B team:
+        user: "We're a 20-person B2B sales team moving off spreadsheets. Shortlist 5 CRM tools with per-seat pricing.",
+        assistant: `Here's a shortlist of 5 CRMs that fit a 20-person B2B team:
 
 1. **HubSpot Sales Hub Starter**: $20/seat/mo (annual). Best free-to-paid path and marketing integration [1]
 2. **Pipedrive Essential**: $14/seat/mo (annual). Simplest pipeline UI, strong for deal tracking [2]
@@ -122,7 +122,7 @@ const conversations: SeedConversation[] = [
 4. **Folk Standard**: $20/seat/mo (annual). Lightweight, great for relationship-driven outreach [4]
 5. **Zoho CRM Standard**: $14/user/mo (annual). Cheapest full-featured option [5]
 
-For 6 seats that's roughly $84–$174/month. Start trials with Pipedrive and Attio.`,
+For 20 seats that's roughly $280–$580/month. Start trials with Pipedrive and Attio.`,
         sources: [
           { n: 1, title: "HubSpot pricing", url: "https://www.hubspot.com/pricing/sales" },
           { n: 2, title: "Pipedrive pricing", url: "https://www.pipedrive.com/en/pricing" },

@@ -4,7 +4,6 @@
  */
 import { cosineSimilarity } from "../llm/embeddings.js";
 import type { Database } from "../storage/database.js";
-import type { TimeWindow } from "../types.js";
 
 /**
  * Cosine thresholds for text-embedding-3-small, measured on real queries: the right past message
@@ -38,14 +37,10 @@ export interface FusedHit {
   similarity: number;
 }
 
-/** Cosine similarity of the query to every embedded message (optionally inside a window), by message id. */
-export function similarityById(
-  db: Database,
-  queryVector: Float32Array,
-  window?: TimeWindow,
-): Map<number, number> {
+/** Cosine similarity of the query to every embedded message, by message id. Computed once per turn. */
+export function similarityById(db: Database, queryVector: Float32Array): Map<number, number> {
   const similarities = new Map<number, number>();
-  for (const row of db.messages.listEmbeddings(window)) {
+  for (const row of db.messages.listEmbeddings()) {
     similarities.set(row.id, cosineSimilarity(queryVector, row.embedding));
   }
   return similarities;
@@ -53,7 +48,7 @@ export function similarityById(
 
 /** Messages at or above `minSimilarity`, most similar first. */
 export function topVectorHits(
-  similarities: Map<number, number>,
+  similarities: ReadonlyMap<number, number>,
   minSimilarity: number,
   exclude: ReadonlySet<number>,
   limit = DEFAULT_LIMIT,

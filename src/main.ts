@@ -20,7 +20,11 @@ if (missing.length > 0) {
   console.warn(`⚠  Missing ${missing.join(", ")}: chat is disabled until you add it to .env.`);
 }
 
-const server = serve({ fetch: app.fetch, port: config.port }, (info) => {
+if (config.fixedNow !== undefined) {
+  console.warn(`⚠  MINIMI_NOW is set: the agent believes it is ${new Date(config.fixedNow).toISOString()}.`);
+}
+
+const server = serve({ fetch: app.fetch, port: config.port, hostname: config.host }, (info) => {
   console.log(
     `Minimi running at http://localhost:${info.port}  (model ${config.chatModel}, db ${config.dbPath})`,
   );

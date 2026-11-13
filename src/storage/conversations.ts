@@ -76,9 +76,15 @@ export class ConversationStore {
     this.connection.prepare("UPDATE conversations SET title = ? WHERE id = ?").run(title, id);
   }
 
-  /** Returns false when there was no such conversation. */
+  /**
+   * Returns false when there was no such conversation. Also clears every stored <context>: those
+   * blocks may quote the deleted conversation (recalled memory), and they only matter for the next
+   * few turns of a chat.
+   */
   delete(id: string): boolean {
     const result = this.connection.prepare("DELETE FROM conversations WHERE id = ?").run(id);
-    return Number(result.changes) > 0;
+    const deleted = Number(result.changes) > 0;
+    if (deleted) this.connection.exec("UPDATE messages SET context = NULL WHERE context IS NOT NULL");
+    return deleted;
   }
 }

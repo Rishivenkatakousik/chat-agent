@@ -1,5 +1,7 @@
-// Latency benchmark over the full chat path (recall → model → searches → answer), on a seeded in-memory DB.
-//   npx tsx scripts/bench.ts [label] [--only=N] [--timeline] [--answers]
+// Latency benchmark over the full chat path (recall → model → searches → answer).
+//   npm run bench -- [label] [--runs=5] [--only=N] [--timeline] [--answers]
+// Every run starts from a fresh seeded in-memory database, so runs don't see each other's answers.
+// One run is noise (searches and the model vary by seconds): compare medians over several runs.
 // Settings come from env as usual (OPENAI_MODEL, OPENAI_REASONING_EFFORT, SEARCH_DEPTH, ...).
 // Results are appended to data/bench.jsonl so runs with different settings can be compared.
 import { appendFileSync } from "node:fs";
@@ -18,33 +20,28 @@ const QUESTIONS = [
 ];
 
 const args = process.argv.slice(2);
-const label = args.find((a) => !a.startsWith("--")) ?? "run";
-const only = Number(args.find((a) => a.startsWith("--only="))?.split("=")[1] ?? NaN);
+const flag = (name: string) => args.find((arg) => arg.startsWith(`--${name}=`))?.split("=")[1];
+const label = args.find((arg) => !arg.startsWith("--")) ?? "run";
+const runs = Math.max(1, Number(flag("runs") ?? 5) || 5);
+const only = Number(flag("only") ?? NaN);
 const showTimeline = args.includes("--timeline");
 const showAnswers = args.includes("--answers");
 const timezone = "Asia/Kolkata";
 
-const db = openDatabase(":memory:");
-seedDemo(db, { now: Date.now(), timezone });
-
-interface BenchRow {
-  q: string;
-  firstTokenMs: number | null;
-  totalMs: number;
-  searches: number;
-  rounds: number;
-  chars: number;
+/** The value below which `share` of the sorted values fall (0.5 = median). */
+function percentile(values: number[], share: number): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.min(sorted.length - 1, Math.ceil(share * sorted.length) - 1)] ?? 0;
 }
 
-const rows: BenchRow[] = [];
-const questions = Number.isInteger(only) ? [QUESTIONS[only]!] : QUESTIONS;
+/** One question on a fresh database. Returns null (and prints the error) when the turn failed. */
+async function runOnce(question: string): Promise<{ stats: TurnStats; text: string } | null> {
+  const db = openDatabase(":memory:");
+  seedDemo(db, { now: Date.now(), timezone });
 
-for (const question of questions) {
   let stats: TurnStats | undefined;
   let text = "";
   let error = "";
-  const startedAt = performance.now();
-
   const { run } = startChat({
     db,
     message: question,
@@ -58,30 +55,71 @@ for (const question of questions) {
     },
   });
   await run();
-  const wallMs = Math.round(performance.now() - startedAt);
+  db.close();
 
   if (!stats) {
-    console.log(`✖ ${question}\n  ${error}`);
-    continue;
+    console.log(`  ✖ ${error}`);
+    return null;
   }
+  return { stats, text };
+}
 
-  rows.push({
-    q: question,
-    firstTokenMs: stats.firstTokenMs,
-    totalMs: stats.totalMs,
-    searches: stats.searches,
-    rounds: stats.rounds,
-    chars: text.length,
-  });
-  console.log(
-    `${String(stats.firstTokenMs ?? "-").padStart(6)}ms first token · ${String(stats.totalMs).padStart(6)}ms answer · ` +
-      `${wallMs}ms incl. recall · ${stats.searches} searches · ${stats.rounds} rounds · ${text.length} chars · ` +
-      `in ${stats.inputTokens} (cached ${stats.cachedTokens}) out ${stats.outputTokens}\n  ${question}`,
-  );
-  if (showTimeline) {
-    for (const mark of stats.timeline) console.log(`    ${String(mark.at).padStart(6)}ms  ${mark.what}`);
+interface BenchRow {
+  q: string;
+  runs: number;
+  firstTokenMs: number;
+  totalMs: number;
+  p90TotalMs: number;
+  searches: number;
+}
+
+const rows: BenchRow[] = [];
+const questions = Number.isInteger(only) ? [QUESTIONS[only]!] : QUESTIONS;
+
+for (const question of questions) {
+  console.log(question);
+  const results: TurnStats[] = [];
+
+  for (let i = 0; i < runs; i++) {
+    const result = await runOnce(question);
+    if (!result) continue;
+    const { stats, text } = result;
+    results.push(stats);
+    console.log(
+      `  ${String(stats.firstTokenMs ?? "-").padStart(6)}ms first token · ${String(stats.totalMs).padStart(6)}ms answer · ` +
+        `${stats.searches} searches · ${stats.rounds} rounds · in ${stats.inputTokens} (cached ${stats.cachedTokens}) out ${stats.outputTokens}`,
+    );
+    if (showTimeline) {
+      for (const mark of stats.timeline) console.log(`      ${String(mark.at).padStart(6)}ms  ${mark.what}`);
+    }
+    if (showAnswers) console.log(`\n${text.replace(/^/gm, "    │ ")}\n`);
   }
-  if (showAnswers) console.log(`\n${text.replace(/^/gm, "    │ ")}\n`);
+  if (results.length === 0) continue;
+
+  const row: BenchRow = {
+    q: question,
+    runs: results.length,
+    firstTokenMs: percentile(
+      results.map((stats) => stats.firstTokenMs ?? stats.totalMs),
+      0.5,
+    ),
+    totalMs: percentile(
+      results.map((stats) => stats.totalMs),
+      0.5,
+    ),
+    p90TotalMs: percentile(
+      results.map((stats) => stats.totalMs),
+      0.9,
+    ),
+    searches: percentile(
+      results.map((stats) => stats.searches),
+      0.5,
+    ),
+  };
+  rows.push(row);
+  console.log(
+    `  → median ${row.firstTokenMs}ms first token · ${row.totalMs}ms answer · p90 ${row.p90TotalMs}ms (${row.runs} runs)`,
+  );
 }
 
 const average = (values: number[]) =>
@@ -91,15 +129,14 @@ const summary = {
   at: new Date().toISOString(),
   model: config.chatModel,
   effort: config.reasoningEffort,
-  avgFirstTokenMs: average(rows.map((row) => row.firstTokenMs ?? row.totalMs)),
+  runsPerQuestion: runs,
+  // Averages of the per-question medians.
+  avgFirstTokenMs: average(rows.map((row) => row.firstTokenMs)),
   avgTotalMs: average(rows.map((row) => row.totalMs)),
-  avgSearches: Number(
-    (rows.reduce((sum, row) => sum + row.searches, 0) / Math.max(rows.length, 1)).toFixed(1),
-  ),
   rows,
 };
 console.log(
-  `\n[${label}] avg first token ${summary.avgFirstTokenMs}ms · avg answer ${summary.avgTotalMs}ms · avg searches ${summary.avgSearches}`,
+  `\n[${label}] medians averaged over ${rows.length} questions: first token ${summary.avgFirstTokenMs}ms · answer ${summary.avgTotalMs}ms`,
 );
 appendFileSync("data/bench.jsonl", JSON.stringify(summary) + "\n");
 process.exit(0);

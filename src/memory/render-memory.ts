@@ -24,6 +24,14 @@ const REASON_LABEL: Record<RecallReason, string> = {
   topic: "matches the topic",
 };
 
+/**
+ * Removes citation markers from a stored message: their numbers belong to another turn and would
+ * collide with the sources of the current one.
+ */
+function withoutCitations(text: string): string {
+  return text.replace(/\s?\[\d+\]/g, "");
+}
+
 /** Trims to `max` characters at a word boundary and marks the cut. */
 export function clip(text: string, max: number): string {
   const trimmed = text.trim();
@@ -40,13 +48,12 @@ function renderExchange(exchange: RecalledExchange, timeZone: string, answerChar
 
   for (const message of exchange.messages) {
     if (message.role === "user") {
-      lines.push(`User: ${clip(message.text, QUESTION_CHARS)}`);
+      lines.push(`User: ${clip(withoutCitations(message.text), QUESTION_CHARS)}`);
       continue;
     }
-    lines.push(`Assistant: ${clip(message.text, answerChars)}`);
+    lines.push(`Assistant: ${clip(withoutCitations(message.text), answerChars)}`);
     if (message.sources.length > 0) {
-      const cited = message.sources.map((source) => `[${source.n}] ${source.url}`).join(" ");
-      lines.push(`Sources cited then: ${cited}`);
+      lines.push(`Sources cited then: ${message.sources.map((source) => source.url).join(" ")}`);
     }
   }
   return lines.join("\n");

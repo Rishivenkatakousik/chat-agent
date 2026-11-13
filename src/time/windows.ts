@@ -14,6 +14,7 @@ import {
   startOfMonth,
   startOfWeek,
   subDays,
+  subMonths,
 } from "date-fns";
 import type { LabeledWindow } from "../types.js";
 import { DAY_FORMAT } from "./format.js";
@@ -92,6 +93,55 @@ export function thisWeekday(today: TZDate, weekday: number): LabeledWindow[] {
 export function weekdayLastWeek(today: TZDate, weekday: number): LabeledWindow[] {
   const lastMonday = subDays(weekStart(today), 7);
   return [dayWindow(addDays(lastMonday, daysFromMonday(weekday)))];
+}
+
+/**
+ * "Last weekend": the Saturday and Sunday before this week's Monday. Said on a Saturday or Sunday,
+ * "the weekend" may also be the one in progress, so both are returned (nearest first).
+ */
+export function weekendWindows(today: TZDate): LabeledWindow[] {
+  const monday = weekStart(today);
+  const lastWeekend = rangeWindow(subDays(monday, 2), monday);
+  const isWeekend = today.getDay() === 6 || today.getDay() === 0;
+  return isWeekend ? [rangeWindow(addDays(monday, 5), addDays(today, 1)), lastWeekend] : [lastWeekend];
+}
+
+// ── Days of the month ───────────────────────────────────────────────
+
+/** "The 3rd": that day of this month, or of last month if it hasn't come yet. Null for an impossible day. */
+export function dayOfMonth(today: TZDate, day: number): TZDate | null {
+  for (const monthsBack of [0, 1]) {
+    const monthStart = startOfMonth<TZDate, TZDate>(subMonths(today, monthsBack));
+    const date = addDays(monthStart, day - 1);
+    const isInThatMonth = date.getMonth() === monthStart.getMonth();
+    if (isInThatMonth && date.getTime() <= today.getTime()) return date;
+  }
+  return null;
+}
+
+/**
+ * "3/11" or "11/3", optionally with a year. Day-first and month-first are both kept when both are
+ * real past dates (most recent first), and the stored conversations decide.
+ */
+export function numericDate(
+  today: TZDate,
+  first: number,
+  second: number,
+  yearText?: string,
+): LabeledWindow[] {
+  const dates: TZDate[] = [];
+  for (const [day, month] of [
+    [first, second],
+    [second, first],
+  ] as const) {
+    const year = yearText ? Number(yearText.length === 2 ? `20${yearText}` : yearText) : today.getFullYear();
+    let date = new TZDate(year, month - 1, day, today.timeZone!);
+    if (date.getMonth() !== month - 1 || date.getDate() !== day) continue; // not a real date
+    if (!yearText && date.getTime() > today.getTime()) date = addYears(date, -1);
+    if (date.getTime() > today.getTime()) continue; // a future date is not a memory cue
+    if (!dates.some((other) => other.getTime() === date.getTime())) dates.push(date);
+  }
+  return dates.sort((a, b) => b.getTime() - a.getTime()).map(dayWindow);
 }
 
 // ── Months ──────────────────────────────────────────────────────────

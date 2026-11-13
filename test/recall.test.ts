@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { Embedder } from "../src/llm/embeddings.js";
-import { extractKeywords, hasMemoryCue } from "../src/memory/query-analysis.js";
+import { extractKeywords, hasChangeCue, hasMemoryCue } from "../src/memory/query-analysis.js";
 import { recall, type RecallResult } from "../src/memory/recall.js";
 import { openDatabase, type Database } from "../src/storage/database.js";
 import { resolveTimeRefs } from "../src/time/resolve-time-refs.js";
@@ -41,7 +41,7 @@ test("seed places conversations on the challenge dates", () => {
   const day = (t: string) =>
     new Date(Date.parse(seeded.days[t]!) + 5.5 * 3600_000).toISOString().slice(0, 10);
   assert.equal(day("Managed Postgres hosting prices"), "2026-11-03");
-  assert.equal(day("CRM shortlist for a 6-person sales team"), "2026-11-09");
+  assert.equal(day("CRM shortlist for a 20-person sales team"), "2026-11-09");
   assert.equal(day("Weekend in Lisbon"), "2026-11-10");
 });
 
@@ -54,7 +54,7 @@ test("keywords and memory cues", () => {
     ["next.js", "faster", "than", "c++"].filter((w) => w !== "than"),
   );
   assert.ok(hasMemoryCue("On Monday we shortlisted 5 CRM tools"));
-  assert.ok(hasMemoryCue("Has anything changed since?"));
+  assert.ok(hasChangeCue("Has anything changed since?"));
   assert.ok(!hasMemoryCue("What's new in Postgres 18?"));
 });
 
@@ -63,7 +63,7 @@ test("keywords and memory cues", () => {
 test("challenge 1: 'On Monday we shortlisted 5 CRM tools' recalls the CRM exchange and its facts", async () => {
   const { db } = setup();
   const r = await ask(db, "On Monday we shortlisted 5 CRM tools. Has anything changed since?");
-  assert.deepEqual(titles(r), ["CRM shortlist for a 6-person sales team"]);
+  assert.deepEqual(titles(r), ["CRM shortlist for a 20-person sales team"]);
   assert.equal(r.exchanges[0]!.reason, "date+topic");
   assert.ok(r.facts.some((f) => f.entity === "CRM shortlist" && f.value.includes("Pipedrive")));
   assert.match(r.memory, /Mon 9 Nov 2026, 15:00/);
@@ -96,7 +96,8 @@ test("challenge 3: ambiguous 'last Tuesday' picks the Tuesday that has Postgres,
     !r.facts.some((f) => f.entity === "Pipedrive"),
     "CRM prices don't leak in through the word 'pricing'",
   );
-  assert.match(r.memory, /Sources cited then: \[1\] https:\/\/neon.com\/pricing/);
+  assert.match(r.memory, /Sources cited then: https:\/\/neon.com\/pricing/);
+  assert.doesNotMatch(r.memory, /\[\d+\]/, "citation numbers from that turn are not carried over");
 });
 
 // ── Honesty and precision ──
@@ -146,7 +147,7 @@ test("embeddings bridge synonyms that keywords miss", async () => {
   assert.equal(withoutVec.exchanges.length, 0, "no keyword overlap");
   const withVec = await ask(db, q, fakeEmbed);
   assert.equal(withVec.stats.usedEmbeddings, true);
-  assert.deepEqual(titles(withVec), ["CRM shortlist for a 6-person sales team"]);
+  assert.deepEqual(titles(withVec), ["CRM shortlist for a 20-person sales team"]);
 });
 
 // ── Phrasings from real use (a user's transcript where recall missed) ──
@@ -192,7 +193,7 @@ test("semantic search runs on every message, not only on cues", async () => {
   const r = await ask(db, "Pipedrive or HubSpot for a sales team?", fakeEmbed);
   assert.equal(r.stats.cue, false);
   assert.equal(r.stats.usedEmbeddings, true);
-  assert.deepEqual(titles(r), ["CRM shortlist for a 6-person sales team"]);
+  assert.deepEqual(titles(r), ["CRM shortlist for a 20-person sales team"]);
 });
 
 test("excluded messages (already in the model's history) are not recalled", async () => {
@@ -219,4 +220,43 @@ test("memory stays within the character budget", async () => {
   });
   assert.ok(r.memory.length <= 1_500, `memory is ${r.memory.length} chars`);
   assert.ok(r.exchanges.length >= 1);
+});
+
+// ── Fixes from the review ──
+
+test("a wide date window says how much it left out", async () => {
+  const db = openDatabase(":memory:");
+  const c = db.conversations.create({ timezone: TZ });
+  for (let i = 0; i < 30; i++) {
+    const time = Date.parse("2026-10-01T06:00:00Z") + i * 86_400_000;
+    db.messages.append({
+      conversationId: c.id,
+      role: "user",
+      text: `Question number ${i + 1}`,
+      createdAt: time,
+    });
+    db.messages.append({
+      conversationId: c.id,
+      role: "assistant",
+      text: `Answer ${i + 1}`,
+      createdAt: time + 1000,
+    });
+  }
+  const r = await ask(db, "What did I ask you last month?");
+  assert.equal(r.exchanges.length, 8);
+  assert.equal(r.exchanges.at(-1)!.messages[0]!.text, "Question number 30", "the most recent ones are shown");
+  assert.match(r.memory, /October 2026 has 30 questions; only the 8 most recent are shown/);
+});
+
+test("a change word alone is not a memory cue; with a known topic it is", async () => {
+  assert.ok(!hasMemoryCue("Is Python still popular?"));
+  assert.ok(hasChangeCue("Is Python still popular?"));
+
+  const { db } = setup();
+  const unknown = await ask(db, "Is Python still popular?");
+  assert.equal(unknown.exchanges.length, 0, "nothing about Python in the history");
+  assert.equal(unknown.stats.cue, false);
+
+  const known = await ask(db, "Has Supabase pricing changed?");
+  assert.deepEqual(titles(known), ["Managed Postgres hosting prices"]);
 });

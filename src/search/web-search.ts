@@ -25,7 +25,8 @@ const CONTENT_CHARS = 1_200;
 const DOMAIN_RESULTS = 3;
 const DOMAIN_CONTENT_CHARS = 2_400;
 const MAX_DOMAINS = 5;
-const TIMEOUT_MS = 20_000;
+/** One slow search holds up the whole round (they are awaited together), so it gets cut off early. */
+const TIMEOUT_MS = 10_000;
 
 // ── Tool definition ─────────────────────────────────────────────────
 
@@ -99,7 +100,7 @@ export function formatSearchOutput(output: SearchOutput): string {
     return JSON.stringify({
       query: output.query,
       results: [],
-      note: "No results. Try a broader query or drop start_date.",
+      note: "No results. A start_date or domains filter may have been too narrow.",
     });
   }
   return JSON.stringify(output);
@@ -183,17 +184,17 @@ function getTavily(): TavilyClient {
   return client;
 }
 
-/** A message the model can act on (retry, or tell the user). */
+/** What went wrong, for the model. Whether it may search again is the agent loop's decision. */
 function describeSearchError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   if (/401|unauthori[sz]ed|invalid api key/i.test(message)) {
     return "Search is unavailable: the Tavily API key was rejected.";
   }
   if (/429|rate limit|usage limit|exceeded/i.test(message)) {
-    return "Search is rate-limited right now. Answer from what you already have and say so.";
+    return "Search is rate-limited right now.";
   }
   if (/timeout|timed out|ETIMEDOUT|aborted/i.test(message)) {
-    return "The search timed out. Try a simpler query or answer from what you have.";
+    return "The search timed out.";
   }
   return `Search failed: ${message.slice(0, 200)}`;
 }
@@ -230,7 +231,9 @@ export const webSearch: WebSearchFunction = async (rawArgs, sources) => {
   const contentChars = domains.length > 0 ? DOMAIN_CONTENT_CHARS : CONTENT_CHARS;
   try {
     const response = await getTavily().search(query, buildTavilyOptions(parsed.data, domains));
-    const results = response.results.map((result): SearchResult => {
+    // Only web pages become sources: a result URL ends up as a link in the UI.
+    const pages = response.results.filter((result) => /^https?:\/\//i.test(result.url));
+    const results = pages.map((result): SearchResult => {
       const title = result.title?.trim() || result.url;
       const published = normalizeDate(result.publishedDate);
       const n = sources.add({ title, url: result.url, published });

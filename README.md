@@ -5,16 +5,41 @@ A chat agent with one tool, web search, plus a memory of past conversations that
 
 ## Run it
 
+Needs **Node 22.13 or later** (it uses Node's built-in SQLite).
+
 ```bash
 cp .env.example .env      # add OPENAI_API_KEY and TAVILY_API_KEY
 npm install
-npm run seed              # optional: back-dated demo conversations
+npm run seed              # demo history, so the memory questions have something to recall
 npm run dev               # http://localhost:3000
 ```
 
-Other scripts: `npm test`, `npm run typecheck`, `npm run format`.
+The design is explained in **[DESIGN.md](DESIGN.md)**.
+
+### Trying the memory questions
+
+Questions like "Last Tuesday I asked about Postgres hosting, has pricing changed?" need a past
+conversation to find. A fresh database has none, so either:
+
+- `npm run seed` adds three back-dated demo conversations (Postgres hosting prices on Tuesday of
+  last week, a 5-tool CRM shortlist on the most recent Monday, an unrelated chat yesterday), or
+- `npm run import -- history.jsonl` loads your own dated history, one JSON object per line:
+  `{"at":"2026-11-03T10:00:00+05:30","role":"user","text":"…","conversation":"postgres"}`.
+  Set `MINIMI_NOW` in `.env` to ask questions as if it were a particular day.
+
+### Other scripts
+
+| Script | What it does |
+|---|---|
+| `npm test` | Unit tests with a fake model and fake search (no network, no keys). |
+| `npm run eval` | Answer-quality checks against the live model and search (uses your keys). |
+| `npm run bench -- <label> --runs=5` | Latency over the full chat path; medians over several runs. |
+| `npm run typecheck`, `npm run format` | TypeScript check, Prettier. |
 
 ## How the code is organized
+
+New to the project? Read **[CODEBASE_GUIDE.md](CODEBASE_GUIDE.md)** first. It explains the whole
+flow from scratch, with diagrams.
 
 Each folder is one part of the app. Imports only point downward in this list, so you can read
 the code bottom-up (basics first) or top-down (follow a request).
@@ -32,7 +57,7 @@ the code bottom-up (basics first) or top-down (follow a request).
 | `src/storage/` | SQLite: `database.ts` opens it, and there is one store per table (`conversations.ts`, `messages.ts`, `facts.ts`). |
 | `src/types.ts`, `src/config.ts` | Shared data shapes and environment settings. |
 | `public/` | The web client: plain HTML/CSS and ES modules in `public/js/` (no build step). |
-| `scripts/` | Demo seed data, a terminal chat client, and a latency benchmark. |
+| `scripts/` | Demo seed data, history import, a terminal chat client, a latency benchmark and an answer-quality eval. |
 | `test/` | `node:test` suites that use a fake model and fake search (no network needed). |
 
 ### One message, step by step

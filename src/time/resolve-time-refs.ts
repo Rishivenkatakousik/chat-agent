@@ -26,14 +26,17 @@ import type { LabeledWindow, TimeRef } from "../types.js";
 import { DAY_FORMAT, safeTimeZone, toEpochMs } from "./format.js";
 import {
   bareWeekday,
+  dayOfMonth,
   dayWindow,
   lastWeekday,
   monthWindow,
   namedMonth,
+  numericDate,
   previousWeekday,
   rangeWindow,
   thisWeekday,
   weekdayLastWeek,
+  weekendWindows,
   weekStart,
   weekWindow,
 } from "./windows.js";
@@ -166,7 +169,7 @@ function resolveThisPeriod(unit: string, today: TZDate): LabeledWindow[] {
   }
 }
 
-/** "last Tuesday", "past Tuesday", "this Tuesday". */
+/** "last Tuesday", "previous Tuesday", "past Tuesday", "this Tuesday". */
 function resolveQualifiedWeekday(qualifier: string, weekday: number, today: TZDate): LabeledWindow[] {
   switch (qualifier) {
     case "this":
@@ -196,19 +199,88 @@ const RULES: Rule[] = [
     resolve: () => [],
   },
   { pattern: /\b(?:tomorrow|tonight)\b/gi, resolve: () => [] },
+  // "Tuesday the 3rd": the day of the month decides; the weekday is only a courtesy.
+  {
+    pattern: new RegExp(`\\b(?:on\\s+)?${WEEKDAY},?\\s+the\\s+(\\d{1,2})(?:st|nd|rd|th)\\b`, "gi"),
+    resolve: (match, today) => {
+      const date = dayOfMonth(today, Number(match[2]));
+      return date ? [dayWindow(date)] : [];
+    },
+  },
+  // "Tuesday 3 November", "Tuesday, Nov 3": the weekday is dropped and the date that follows is resolved below.
+  {
+    pattern: new RegExp(`\\b${WEEKDAY},?\\s+(?=\\d{1,2}(?:st|nd|rd|th)?\\b|${MONTH}\\b)`, "gi"),
+    resolve: () => [],
+  },
+  // "on the 3rd" (with a lead-in word, so "the 2nd option" isn't read as a date)
+  {
+    pattern: new RegExp(
+      `\\b(?:on|since|from)\\s+the\\s+(\\d{1,2})(?:st|nd|rd|th)\\b(?!\\s+(?:of\\s+)?${MONTH}\\b)`,
+      "gi",
+    ),
+    resolve: (match, today) => {
+      const date = dayOfMonth(today, Number(match[1]));
+      return date ? [dayWindow(date)] : [];
+    },
+  },
+  // "on 3/11", "since 11/3/2026" (with a lead-in word, so "24/7" and "9/10" aren't read as dates)
+  {
+    pattern: /\b(?:on|since|from)\s+(\d{1,2})\/(\d{1,2})(?:\/(\d{2}|\d{4}))?\b/gi,
+    resolve: (match, today) => numericDate(today, Number(match[1]), Number(match[2]), match[3]),
+  },
+  // "the Tuesday before last", "two Tuesdays ago"
+  {
+    pattern: new RegExp(`\\b(?:the\\s+)?${WEEKDAY}\\s+before\\s+last\\b`, "gi"),
+    resolve: (match, today) => [dayWindow(subDays(previousWeekday(today, weekdayIndex(match[1]!)), 7))],
+  },
+  {
+    pattern: new RegExp(`\\b${NUMBER}\\s+${WEEKDAY}s\\s+ago\\b`, "gi"),
+    resolve: (match, today) => {
+      const weeksBack = parseNumber(match[1]!) - 1;
+      return [dayWindow(subDays(previousWeekday(today, weekdayIndex(match[2]!)), 7 * weeksBack))];
+    },
+  },
+  {
+    pattern: /\b(?:the\s+)?week\s+before\s+last\b/gi,
+    resolve: (_match, today) => [weekWindow(subDays(today, 14))],
+  },
+  {
+    pattern: /\b(?:last|this\s+past|this|over\s+the)\s+weekend\b/gi,
+    resolve: (_match, today) => weekendWindows(today),
+  },
   {
     pattern: /\b(?:the\s+)?day\s+before\s+yesterday\b/gi,
     resolve: (_match, today) => [dayWindow(subDays(today, 2))],
   },
-  { pattern: /\byesterday\b/gi, resolve: (_match, today) => [dayWindow(subDays(today, 1))] },
+  {
+    pattern: /\b(?:yesterday|last\s+night)\b/gi,
+    resolve: (_match, today) => [dayWindow(subDays(today, 1))],
+  },
+  // "an hour ago", "a few minutes ago": earlier today
+  {
+    pattern: new RegExp(`\\b${NUMBER}\\s+(?:hour|minute|min)s?\\s+ago\\b`, "gi"),
+    resolve: (_match, today) => [dayWindow(today)],
+  },
   {
     pattern: /\b(?:earlier\s+today|today\s+earlier|this\s+(?:morning|afternoon|evening))\b/gi,
     resolve: (_match, today) => [dayWindow(today)],
   },
-  // "3 days ago", "two weeks ago", "a couple of months ago"
+  // "3 days ago", "two weeks ago", "a couple of months back", "a fortnight ago"
   {
-    pattern: new RegExp(`\\b${NUMBER}\\s+(day|week|month)s?\\s+ago\\b`, "gi"),
+    pattern: new RegExp(`\\b${NUMBER}\\s+(day|week|month)s?\\s+(?:ago|back)\\b`, "gi"),
     resolve: (match, today) => resolveAgo(parseNumber(match[1]!), unitOf(match[2]!), today),
+  },
+  {
+    pattern: /\b(?:a|one)\s+fortnight\s+(?:ago|back)\b/gi,
+    resolve: (_match, today) => resolveAgo(2, "week", today),
+  },
+  // "at the start of the month", "end of last month"
+  {
+    pattern: /\b(?:at\s+)?(?:the\s+)?(?:start|beginning|end)\s+of\s+(the|this|last)\s+month\b/gi,
+    resolve: (match, today) =>
+      match[1]!.toLowerCase() === "last"
+        ? resolveLastPeriod("month", today)
+        : resolveThisPeriod("month", today),
   },
   // Rolling ranges: "past 3 days", "in the last two weeks", "over the past few days"
   {
@@ -231,7 +303,7 @@ const RULES: Rule[] = [
   },
   // Weekdays
   {
-    pattern: new RegExp(`\\b(last|past|this)\\s+${WEEKDAY}\\b`, "gi"),
+    pattern: new RegExp(`\\b(last|previous|past|this)\\s+${WEEKDAY}\\b`, "gi"),
     resolve: (match, today) =>
       resolveQualifiedWeekday(match[1]!.toLowerCase(), weekdayIndex(match[2]!), today),
   },

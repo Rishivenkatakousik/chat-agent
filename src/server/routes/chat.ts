@@ -9,7 +9,7 @@ import type { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { z } from "zod";
 import { ChatError, startChat, type ChatEvent, type StartedChat } from "../../chat/chat-service.js";
-import { missingKeys } from "../../config.js";
+import { config, missingKeys } from "../../config.js";
 import type { Database } from "../../storage/database.js";
 import type { AppOptions } from "../app.js";
 
@@ -24,6 +24,13 @@ export function registerChatRoute(app: Hono, db: Database, options: AppOptions):
     const missing = options.requireKeys === false ? [] : missingKeys();
     if (missing.length > 0) {
       return c.json({ error: `Server is missing ${missing.join(", ")}. Add it to .env and restart.` }, 503);
+    }
+
+    // Browsers send JSON cross-site only after a preflight, which this server never approves. Other
+    // content types (text/plain, forms) need no preflight, so accepting them would let any web page
+    // post messages into the user's memory.
+    if (!c.req.header("content-type")?.toLowerCase().startsWith("application/json")) {
+      return c.json({ error: "Content-Type must be application/json." }, 415);
     }
 
     const body = chatRequestBody.safeParse(await c.req.json().catch(() => null));
@@ -43,6 +50,7 @@ export function registerChatRoute(app: Hono, db: Database, options: AppOptions):
         message: body.data.message,
         timezone: body.data.timezone,
         signal: abortController.signal,
+        now: config.fixedNow,
         deps: options.deps,
         onEvent: (event) => sendEvent(event),
       });

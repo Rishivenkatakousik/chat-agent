@@ -4,6 +4,7 @@
  */
 import { Hono } from "hono";
 import { serveStatic } from "@hono/node-server/serve-static";
+import { bodyLimit } from "hono/body-limit";
 import type { ChatDependencies } from "../chat/chat-service.js";
 import type { Database } from "../storage/database.js";
 import { registerChatRoute } from "./routes/chat.js";
@@ -18,6 +19,12 @@ export interface AppOptions {
 
 export function createApp(db: Database, options: AppOptions = {}): Hono {
   const app = new Hono();
+
+  // A chat message is at most 8,000 characters; nothing legitimate is bigger than this.
+  app.use(
+    "/api/*",
+    bodyLimit({ maxSize: 64 * 1024, onError: (c) => c.json({ error: "Request is too large." }, 413) }),
+  );
 
   registerConversationRoutes(app, db);
   registerChatRoute(app, db, options);

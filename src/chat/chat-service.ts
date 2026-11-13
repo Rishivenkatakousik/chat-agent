@@ -67,6 +67,10 @@ export class ChatError extends Error {
 
 /** How long the stream stays open after `done`, waiting for a new conversation's title. */
 const TITLE_WAIT_MS = 4_000;
+/** A turn that runs longer than this (a stalled stream, a hung search) is stopped with an error. */
+const TURN_DEADLINE_MS = 120_000;
+/** Added to an answer that was stopped or failed midway, so the model and the user know it is incomplete. */
+const CUT_OFF_NOTE = "\n\n_(This answer was cut off before it finished.)_";
 
 const locks = new ConversationLocks();
 const backgroundJobs = new BackgroundJobs();
@@ -122,12 +126,21 @@ async function runChat(chat: ClaimedChat): Promise<Message | null> {
   const { request, conversationId } = chat;
   const { db } = request;
 
+  const now = request.now ?? Date.now();
+  const startedAt = performance.now();
+  /** The answer's timestamp: the question's time plus the time the turn took (also right with a fixed clock). */
+  const answerTime = () => now + Math.max(1, Math.round(performance.now() - startedAt));
+
+  const deadline = AbortSignal.timeout(TURN_DEADLINE_MS);
+  const signal = request.signal ? AbortSignal.any([request.signal, deadline]) : deadline;
+  /** The answer text streamed so far, kept if the turn is stopped or fails midway. */
+  let streamed = "";
+
   try {
-    const now = request.now ?? Date.now();
     request.onEvent({ type: "conversation", id: conversationId, created: chat.created });
 
     const history = db.messages.list(conversationId, { withContext: true });
-    // Stored first so the question is never lost; the answer is stored only if the run succeeds.
+    // Stored first so the question is never lost.
     const question = db.messages.append({ conversationId, role: "user", text: chat.message, createdAt: now });
     const context = await prepareContext(chat, question, history, now);
 
@@ -135,10 +148,11 @@ async function runChat(chat: ClaimedChat): Promise<Message | null> {
       message: chat.message,
       history,
       context,
-      signal: request.signal,
+      signal,
       deps: request.deps,
-      // `done` is re-sent below with the stored message id.
       onEvent: (event) => {
+        if (event.type === "text") streamed += event.delta;
+        // `done` is re-sent below with the stored message id.
         if (event.type !== "done") request.onEvent(event);
       },
     });
@@ -148,8 +162,7 @@ async function runChat(chat: ClaimedChat): Promise<Message | null> {
       role: "assistant",
       text: result.text,
       sources: result.sources,
-      // Never earlier than the question, even if the clock was faked by a test.
-      createdAt: Math.max(Date.now(), now + 1),
+      createdAt: answerTime(),
     });
     request.onEvent({ type: "done", messageId: answer.id, ...result });
     // The answer is complete: free the conversation before the background work.
@@ -165,12 +178,22 @@ async function runChat(chat: ClaimedChat): Promise<Message | null> {
     await sendTitleWhenReady(chat, enrichment);
     return answer;
   } catch (error) {
+    // Keep what the user already read (marked as cut off), so the next turn knows what was said.
+    // No facts are extracted from it. The conversation may have been deleted meanwhile.
+    if (streamed.trim() && db.conversations.get(conversationId)) {
+      const text = streamed.trim() + CUT_OFF_NOTE;
+      db.messages.append({ conversationId, role: "assistant", text, createdAt: answerTime() });
+    }
+
     if (request.signal?.aborted) {
       console.log(`[chat] ${conversationId}: client disconnected, run aborted`);
       return null;
     }
     console.error(`[chat] ${conversationId}: ${describeErrorForLog(error)}`);
-    request.onEvent({ type: "error", message: friendlyError(error) });
+    const message = deadline.aborted
+      ? "This took too long and was stopped. Please try again."
+      : friendlyError(error);
+    request.onEvent({ type: "error", message });
     return null;
   } finally {
     chat.release();

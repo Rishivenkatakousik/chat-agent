@@ -18,6 +18,11 @@ export function h(tag, props = {}, ...children) {
   return element;
 }
 
+/** Only http(s) URLs may become links (a source URL comes from the web and is not trusted). */
+export function isWebUrl(url) {
+  return /^https?:\/\//i.test(url);
+}
+
 /** "https://www.neon.com/pricing" → "neon.com" */
 export function domain(url) {
   try {

@@ -32,6 +32,12 @@ function readPositiveInt(name: string, fallback: number): number {
   return Number.isInteger(value) && value > 0 ? value : fallback;
 }
 
+/** An ISO date/time as epoch milliseconds, or undefined when missing or unparseable. */
+function readTimestamp(name: string): number | undefined {
+  const time = Date.parse(readEnv(name) ?? "");
+  return Number.isNaN(time) ? undefined : time;
+}
+
 function readEnum<T extends string>(name: string, allowed: readonly T[], fallback: T): T {
   const value = readEnv(name);
   return allowed.includes(value as T) ? (value as T) : fallback;
@@ -39,6 +45,10 @@ function readEnum<T extends string>(name: string, allowed: readonly T[], fallbac
 
 export const config = {
   port: readPositiveInt("PORT", 3000),
+  /** Loopback by default: there is no login, so the app must not be reachable from the network. */
+  host: readString("HOST", "127.0.0.1"),
+  /** MINIMI_NOW: a fixed "current time" for demos and evals over imported history. Normally unset. */
+  fixedNow: readTimestamp("MINIMI_NOW"),
   dbPath: readString("DB_PATH", "./data/minimi.db"),
 
   openaiApiKey: readString("OPENAI_API_KEY", ""),
@@ -49,7 +59,11 @@ export const config = {
   reasoningEffort: readEnum("OPENAI_REASONING_EFFORT", REASONING_EFFORTS, "low"),
   /** Cheap model for off-critical-path work: fact extraction, conversation titles. */
   extractModel: readString("OPENAI_EXTRACT_MODEL", "gpt-6-luna"),
-  embeddingModel: readString("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small"),
+  /**
+   * Not configurable on purpose: stored vectors are only comparable with vectors from the same
+   * model, and the similarity thresholds in memory/ranking.ts were measured for this one.
+   */
+  embeddingModel: "text-embedding-3-small",
 
   /** Tavily search depth: "advanced" ranks and extracts better, "basic" is faster. */
   searchDepth: readEnum("SEARCH_DEPTH", SEARCH_DEPTHS, "advanced"),

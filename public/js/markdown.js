@@ -3,6 +3,7 @@
  */
 import { marked } from "/vendor/marked.js";
 import DOMPurify from "/vendor/purify.js";
+import { isWebUrl } from "./dom.js";
 
 marked.setOptions({ gfm: true, breaks: false });
 
@@ -48,7 +49,8 @@ function citationLink(source, label) {
 
 /** Turns [n] in the text (outside code and links) into small links to source n. */
 function linkCitations(root, sources) {
-  const sourceByNumber = new Map(sources.map((source) => [source.n, source]));
+  const webSources = sources.filter((source) => isWebUrl(source.url));
+  const sourceByNumber = new Map(webSources.map((source) => [source.n, source]));
 
   for (const node of citationTextNodes(root)) {
     const text = node.nodeValue;

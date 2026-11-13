@@ -3,7 +3,7 @@
  * with its answer streamed in live (status lines, markdown, citations, source chips).
  */
 import { postChat, readSseEvents, api } from "./api.js";
-import { domain, formatTime, h } from "./dom.js";
+import { domain, formatTime, h, isWebUrl } from "./dom.js";
 import { renderMarkdown } from "./markdown.js";
 import { closeNav, els, hideBanner, setPageTitle, showBanner, state, timezone } from "./page.js";
 import { loadConversations, renderSidebar } from "./sidebar.js";
@@ -40,8 +40,9 @@ function userMessageElement(text, createdAt) {
   );
 }
 
-function sourceChips(sources) {
-  if (!sources?.length) return null;
+function sourceChips(allSources) {
+  const sources = (allSources ?? []).filter((source) => isWebUrl(source.url));
+  if (sources.length === 0) return null;
   return h(
     "div",
     { class: "sources" },
@@ -75,30 +76,54 @@ function messageElement(message) {
     : assistantMessageElement(message.text, message.sources);
 }
 
-// ── Suggestions (the challenge-style questions; dates follow the demo data if it is seeded) ──
+// ── Suggestions ────────────────────────────────────────────────────
 
+/**
+ * With the demo data (`npm run seed`) the suggestions are the challenge-style memory questions,
+ * with dates that follow the seeded conversations. Without it there is no history to recall, so
+ * they are questions that work on an empty database.
+ */
 export function renderSuggestions(onPick) {
   const seededPostgres = state.conversations.find((c) => c.id === "seed-postgres-hosting");
-  const postgresDay = seededPostgres
-    ? new Date(seededPostgres.created_at).toLocaleDateString(undefined, { day: "numeric", month: "long" })
-    : "3 November";
+  const items = seededPostgres ? memorySuggestions(seededPostgres) : firstRunSuggestions();
 
-  const items = [
+  const buttons = items.map(([question, why]) =>
+    h(
+      "button",
+      { class: "suggestion", type: "button", onclick: () => onPick(question) },
+      question,
+      h("small", {}, why),
+    ),
+  );
+  const note = seededPostgres
+    ? null
+    : h(
+        "p",
+        { class: "hint" },
+        "Memory questions need history. Chat first, or run `npm run seed` for demo conversations.",
+      );
+  els.suggestions.replaceChildren(...buttons, ...(note ? [note] : []));
+}
+
+function memorySuggestions(seededPostgres) {
+  const postgresDay = new Date(seededPostgres.created_at).toLocaleDateString(undefined, {
+    day: "numeric",
+    month: "long",
+  });
+  return [
     ["On Monday we shortlisted 5 CRM tools. Has anything changed since?", "Recall by weekday + fresh search"],
     [`What did I ask you on ${postgresDay}? Is it still correct?`, "Recall by date + re-verify"],
     ["Last Tuesday I asked about Postgres hosting. Has pricing changed?", "Ambiguous date + then vs now"],
     ["What's new in the latest Node.js release?", "Plain web search"],
   ];
-  els.suggestions.replaceChildren(
-    ...items.map(([question, why]) =>
-      h(
-        "button",
-        { class: "suggestion", type: "button", onclick: () => onPick(question) },
-        question,
-        h("small", {}, why),
-      ),
-    ),
-  );
+}
+
+function firstRunSuggestions() {
+  return [
+    ["What's new in the latest Node.js release?", "Plain web search"],
+    ["Compare Neon and Supabase pricing for a small app", "Parallel searches, cited"],
+    ["Explain the difference between a mutex and a semaphore", "No search needed"],
+  ];
 }
 
 // ── Opening and starting conversations ─────────────────────────────
@@ -227,7 +252,7 @@ class PendingAnswer {
     this.stopLiveParts();
     if (error.name === "AbortError") {
       if (this.text) renderMarkdown(this.answer, this.text, this.sources);
-      this.element.append(h("div", { class: "stats" }, "Stopped. This answer was not saved."));
+      this.element.append(h("div", { class: "stats" }, "Stopped."));
     } else {
       this.element.append(h("div", { class: "error" }, error.message || "Something went wrong."));
     }

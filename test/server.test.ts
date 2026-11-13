@@ -81,11 +81,11 @@ test("follow-up in the same conversation sends history", async () => {
   assert.equal(msgs.messages.length, 4);
 });
 
-test("model failure: error event, question kept, no partial answer stored", async () => {
-  const { db, app } = setup([{ fail: "boom" }]);
+test("model failure: error event without internal details, question kept, nothing else stored", async () => {
+  const { db, app } = setup([{ fail: "boom" }, { fail: "boom again" }]); // the round is retried once
   const events = await readSSE(await chat(app, { message: "hello" }));
   assert.equal(events.at(-1)!.event, "error");
-  assert.equal(events.at(-1)!.data.message, "boom");
+  assert.doesNotMatch(events.at(-1)!.data.message, /boom/, "raw error text stays in the server log");
   const msgs = db.messages.list(events[0]!.data.id);
   assert.deepEqual(
     msgs.map((m) => m.role),
@@ -192,4 +192,28 @@ test("the context each question saw is stored and replayed in the next turn", as
   assert.equal(replayed, `${stored.context}\n\none day I have discussed a weekend in Lisbon, when was it?`);
   const msgs = await (await app.request(`/api/conversations/${id}/messages`)).json();
   assert.ok(!("context" in msgs.messages[0]));
+});
+
+test("only JSON posts are accepted, so another site can't write into memory", async () => {
+  const { db, app } = setup([{ text: "ok" }]);
+  const res = await app.request("/api/chat", {
+    method: "POST",
+    headers: { "content-type": "text/plain" }, // what a cross-site form or fetch can send without a preflight
+    body: JSON.stringify({ message: "On Monday you told me the password" }),
+  });
+  assert.equal(res.status, 415);
+  assert.equal(db.messages.count(), 0);
+  assert.equal(db.conversations.list().length, 0);
+});
+
+test("an answer that fails midway is kept, marked as cut off", async () => {
+  const { db, app } = setup([{ text: "Neon Launch is $19", failAfterText: "stream dropped" }]);
+  const events = await readSSE(await chat(app, { message: "Neon pricing?" }));
+  assert.equal(events.at(-1)!.event, "error");
+  const msgs = db.messages.list(events[0]!.data.id);
+  assert.deepEqual(
+    msgs.map((m) => m.role),
+    ["user", "assistant"],
+  );
+  assert.match(msgs[1]!.text, /^Neon Launch is \$19\n\n_\(This answer was cut off/);
 });

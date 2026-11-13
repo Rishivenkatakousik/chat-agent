@@ -47,13 +47,26 @@ const MEMORY_CUE = new RegExp(
     // "you said", "you once suggested", "you have told me"
     `\\byou(?:'ve)?(?:\\s+(?:have|had|once|already|just))?\\s+(?:said|told|suggested|recommended|mentioned|found|quoted|listed|gave|planned|answered|replied)\\b`,
     // "last time", "the other day", "our conversation", "the list", ...
-    `\\b(?:last time|earlier|previously|remember|recall|again|still|since|changed|any changes|one day|the other day|some time ago|a while (?:ago|back)|our (?:chat|conversation|discussion|talk)|that (?:list|chat|conversation)|the list|shortlist|history)\\b`,
+    `\\b(?:last time|previously|remember|recall|one day|the other day|some time ago|a while (?:ago|back)|our (?:chat|conversation|discussion|talk)|that (?:list|chat|conversation)|the list|shortlist|history)\\b`,
   ].join("|"),
   "i",
 );
 
+/**
+ * Words that often, but not always, point at an earlier answer ("has it changed?", "is it still…").
+ * "Is Python still popular?" has one too, so on their own they prove nothing: recall counts them
+ * only when the message also names a date or a topic that exists in the history.
+ */
+const CHANGE_CUE = /\b(?:earlier|again|still|since|changed|any changes)\b/i;
+
+/** The message clearly refers to an earlier conversation ("I asked", "we discussed", "last time"). */
 export function hasMemoryCue(message: string): boolean {
   return MEMORY_CUE.test(message);
+}
+
+/** The message asks about change over time, which may or may not refer to an earlier conversation. */
+export function hasChangeCue(message: string): boolean {
+  return CHANGE_CUE.test(message);
 }
 
 // ── Keywords ────────────────────────────────────────────────────────

@@ -4,8 +4,17 @@ import type { SearchOutput } from "../src/search/web-search.js";
 
 /** Scripted fake model and search for testing the agent loop without network access. */
 
-/** One scripted model round: tool calls and/or text; `fail` throws; `delayMs` waits (honouring abort) before streaming. */
-export type Round = { calls?: string[]; text?: string; fail?: string; delayMs?: number };
+/**
+ * One scripted model round: tool calls and/or text; `fail` throws before anything is streamed,
+ * `failAfterText` throws after the text was streamed; `delayMs` waits (honouring abort) before streaming.
+ */
+export type Round = {
+  calls?: string[];
+  text?: string;
+  fail?: string;
+  failAfterText?: string;
+  delayMs?: number;
+};
 
 /**
  * `extract` answers non-streaming calls (background fact/title extraction): an object to return as JSON,
@@ -52,6 +61,7 @@ export function fakeClient(rounds: Round[], extract: object | Error = { title: n
           if (r.text) {
             for (const chunk of r.text.match(/.{1,8}/gs) ?? [])
               yield { type: "response.output_text.delta", delta: chunk };
+            if (r.failAfterText) throw new Error(r.failAfterText);
             output.push({
               type: "message",
               role: "assistant",

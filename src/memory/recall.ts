@@ -17,6 +17,7 @@ import type { Fact, LabeledWindow, Message, TimeRef } from "../types.js";
 import {
   extractKeywords,
   findDistinctiveKeywords,
+  hasChangeCue,
   hasMemoryCue,
   keywordMatchQuality,
 } from "./query-analysis.js";
@@ -82,10 +83,14 @@ interface Query {
   keywords: string[];
   /** FTS5 expression for the keywords; null when there are none. */
   match: string | null;
-  /** The message refers to an earlier conversation ("I asked", "since"). */
+  /** The message clearly refers to an earlier conversation ("I asked", "we discussed"). */
   cue: boolean;
+  /** The message asks about change ("still", "since"): a cue only together with a date or a known topic. */
+  changeCue: boolean;
   /** Embedding of the message; null when embeddings are unavailable. */
   vector: Float32Array | null;
+  /** Cosine similarity of the message to every embedded past message, by id (empty without a vector). */
+  similarities: ReadonlyMap<number, number>;
   /** Keywords that are rare in the history, so a single one is a real signal. */
   distinctive: ReadonlySet<string>;
 }
@@ -124,7 +129,10 @@ async function analyzeQuery(input: RecallInput): Promise<Query> {
     keywords,
     match: toFtsQuery(keywords),
     cue: hasMemoryCue(message),
+    changeCue: hasChangeCue(message),
     vector,
+    // One pass over the stored vectors per turn; the date windows below reuse it.
+    similarities: vector ? similarityById(db, vector) : new Map(),
     distinctive: findDistinctiveKeywords(db, keywords),
   };
 }
@@ -151,9 +159,12 @@ function searchWindow(
   const keywordHits = query.match
     ? db.messages.search(query.match, window, SEARCH_LIMIT).filter((message) => !exclude.has(message.id))
     : [];
-  const vectorHits = query.vector
-    ? topVectorHits(similarityById(db, query.vector, window), SIMILARITY_IN_WINDOW, exclude)
-    : [];
+  const similaritiesInWindow = new Map<number, number>();
+  for (const message of messages) {
+    const similarity = query.similarities.get(message.id);
+    if (similarity !== undefined) similaritiesInWindow.set(message.id, similarity);
+  }
+  const vectorHits = topVectorHits(similaritiesInWindow, SIMILARITY_IN_WINDOW, exclude);
   return { window, messages, hits: reciprocalRankFusion(keywordHits, vectorHits) };
 }
 
@@ -198,6 +209,9 @@ function recallFromDateWindows(
       if (anyTopicMatch) {
         if (hits.length > 0) {
           for (const hit of hits.slice(0, MAX_WINDOW_EXCHANGES)) candidates.add(hit.id, "date+topic");
+          if (hits.length > MAX_WINDOW_EXCHANGES) {
+            notes.push(`${window.label}: more matched than fit here; showing the closest matches only.`);
+          }
         } else {
           notes.push(
             `${window.label} ("${ref.phrase}"): ${describeTopics(db, messages)} — nothing about this topic.`,
@@ -214,6 +228,14 @@ function recallFromDateWindows(
       const questions = messages.filter((message) => message.role === "user");
       const shown = (questions.length > 0 ? questions : messages).slice(-MAX_WINDOW_EXCHANGES);
       for (const message of shown) candidates.add(message.id, "date");
+
+      // Say so when the window holds more than is shown, so the model doesn't present a part as the whole.
+      const totalQuestions = db.messages.countQuestionsInWindow(window);
+      if (totalQuestions > shown.length) {
+        notes.push(
+          `${window.label} has ${totalQuestions} questions; only the ${shown.length} most recent are shown.`,
+        );
+      }
     }
   }
 }
@@ -223,9 +245,15 @@ function recallFromDateWindows(
 /**
  * Searches all past messages, but takes a hit only when the match is convincing: enough keyword
  * overlap that is also related in meaning, or a high similarity on its own. A memory cue
- * ("I asked", "one day") lowers both bars.
+ * ("I asked", "one day") lowers both bars; so does a change word ("still", "since") when the
+ * message also names a date or a topic the history knows.
  */
-function recallFromWholeHistory(db: Database, query: Query, candidates: CandidateList): void {
+function recallFromWholeHistory(
+  db: Database,
+  query: Query,
+  candidates: CandidateList,
+  hasDates: boolean,
+): void {
   if (!query.match && !query.vector) return;
   const { exclude } = candidates;
 
@@ -233,16 +261,17 @@ function recallFromWholeHistory(db: Database, query: Query, candidates: Candidat
     ? db.messages.search(query.match, undefined, SEARCH_LIMIT).filter((message) => !exclude.has(message.id))
     : [];
   // Similarity to every embedded message: ranks semantic hits and corroborates keyword hits.
-  const similarities = query.vector ? similarityById(db, query.vector) : new Map<number, number>();
+  const { similarities } = query;
   const vectorHits = topVectorHits(similarities, SIMILARITY_GLOBAL, exclude);
+  const cue = query.cue || (query.changeCue && (hasDates || keywordHits.length > 0));
 
   const textById = new Map(keywordHits.map((message) => [message.id, message.text]));
   const missingIds = vectorHits.map((hit) => hit.id).filter((id) => !textById.has(id));
   for (const message of db.messages.getByIds(missingIds)) textById.set(message.id, message.text);
 
-  const maxHits = query.cue ? MAX_HISTORY_HITS_WITH_CUE : MAX_HISTORY_HITS;
-  const minKeywordQuality = query.cue ? 1 : 2;
-  const minSimilarity = query.cue ? SIMILARITY_GLOBAL : SIMILARITY_STRONG;
+  const maxHits = cue ? MAX_HISTORY_HITS_WITH_CUE : MAX_HISTORY_HITS;
+  const minKeywordQuality = cue ? 1 : 2;
+  const minSimilarity = cue ? SIMILARITY_GLOBAL : SIMILARITY_STRONG;
   let taken = 0;
 
   for (const hit of reciprocalRankFusion(keywordHits, vectorHits)) {
@@ -268,7 +297,8 @@ function recallFromWholeHistory(db: Database, query: Query, candidates: Candidat
  * exchange it came from, since its wording may share too few keywords to be found directly.
  */
 function recallFromFacts(db: Database, timeRefs: TimeRef[], query: Query, candidates: CandidateList): Fact[] {
-  if (!query.match || (!query.cue && timeRefs.length === 0)) return [];
+  // A fact is only taken when the keywords match its own text, so a change word is cue enough here.
+  if (!query.match || (!query.cue && !query.changeCue && timeRefs.length === 0)) return [];
 
   // Same bar as message recall: one common word ("pricing") doesn't pull in unrelated facts.
   const minQuality = query.keywords.length >= 2 ? 1.5 : 1;
@@ -345,7 +375,7 @@ export async function recall(input: RecallInput): Promise<RecallResult> {
   const notes: string[] = [];
 
   recallFromDateWindows(db, timeRefs, query, candidates, notes);
-  recallFromWholeHistory(db, query, candidates);
+  recallFromWholeHistory(db, query, candidates, timeRefs.length > 0);
   const matchedFacts = recallFromFacts(db, timeRefs, query, candidates);
 
   const exchanges = expandToExchanges(db, candidates);

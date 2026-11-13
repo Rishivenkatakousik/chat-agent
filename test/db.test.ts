@@ -133,3 +133,40 @@ test("nested transactions join the outer one", () => {
     "the inner insert was rolled back with the outer transaction",
   );
 });
+
+test("a question that was never answered doesn't borrow a later answer", () => {
+  const { db, c2 } = setup();
+  const unanswered = db.messages.append({
+    conversationId: c2.id,
+    role: "user",
+    text: "Compare Neon and Supabase",
+  });
+  db.messages.append({ conversationId: c2.id, role: "user", text: "What is the capital of France?" });
+  db.messages.append({ conversationId: c2.id, role: "assistant", text: "Paris." });
+  assert.deepEqual(
+    db.messages.getExchange(unanswered.id).map((m) => m.text),
+    ["Compare Neon and Supabase"],
+  );
+});
+
+test("a window keeps its newest messages and reports how many questions it holds", () => {
+  const { db, c2 } = setup();
+  const day = { start: at("2026-11-09T00:00:00Z"), end: at("2026-11-10T00:00:00Z") };
+  assert.equal(db.messages.countQuestionsInWindow(day), 1);
+  const newest = db.messages.listInWindow(day, 1);
+  assert.deepEqual(
+    newest.map((m) => m.role),
+    ["assistant"],
+    "with a limit, the latest message wins",
+  );
+  assert.equal(db.messages.listInWindow(day).length, 2);
+  assert.equal(db.messages.list(c2.id)[0]!.id, db.messages.listInWindow(day)[0]!.id, "still oldest first");
+});
+
+test("deleting a conversation clears stored contexts, which may quote it", () => {
+  const { db, c1, c2 } = setup();
+  const question = db.messages.list(c2.id)[0]!;
+  db.messages.setContext(question.id, "<context>recalled: Neon Launch is $19/mo</context>");
+  db.conversations.delete(c1.id);
+  assert.equal(db.messages.list(c2.id, { withContext: true })[0]!.context, null);
+});

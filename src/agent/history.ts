@@ -7,6 +7,7 @@
  */
 import type { ResponseInputItem } from "openai/resources/responses/responses";
 import type { Message } from "../types.js";
+import { escapeContextTags } from "./prompt.js";
 
 /** Recent messages sent verbatim. */
 const HISTORY_MESSAGES = 12;
@@ -15,9 +16,9 @@ const HISTORY_CHARS = 16_000;
 const REPLAY_CONTEXT_TURNS = 3;
 const REPLAY_CONTEXT_CHARS = 24_000;
 
-/** Ids of the messages the model will see verbatim, so recall doesn't repeat them. */
+/** Ids of the messages the model will see verbatim (after trimming), so recall doesn't repeat them. */
 export function recentHistoryIds(history: Message[]): number[] {
-  return history.slice(-HISTORY_MESSAGES).map((message) => message.id);
+  return trimHistory(history).map((message) => message.id);
 }
 
 /** The recent messages that fit the budget, starting on a user message so the transcript is well-formed. */
@@ -61,6 +62,9 @@ export function buildHistoryInput(history: Message[]): ResponseInputItem[] {
 
   return recent.map((message) => ({
     role: message.role,
-    content: replay.has(message.id) ? `${message.context}\n\n${message.text}` : message.text,
+    // Same form as when the question was first sent (see buildUserInput), so the prompt prefix matches.
+    content: replay.has(message.id)
+      ? `${message.context}\n\n${escapeContextTags(message.text)}`
+      : message.text,
   }));
 }

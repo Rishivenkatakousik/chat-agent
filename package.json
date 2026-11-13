@@ -9,9 +9,14 @@
     "node": ">=22.13"
   },
   "scripts": {
+    "predev": "node scripts/check-node.mjs",
     "dev": "tsx watch --clear-screen=false src/main.ts",
+    "prestart": "node scripts/check-node.mjs",
     "start": "tsx src/main.ts",
     "seed": "tsx scripts/seed.ts",
+    "import": "tsx scripts/import.ts",
+    "bench": "tsx scripts/bench.ts",
+    "eval": "tsx scripts/eval.ts",
     "test": "tsx --test test/*.test.ts",
     "typecheck": "tsc --noEmit",
     "format": "prettier --write .",
